@@ -31,9 +31,34 @@ def test_to_json_matches_schema():
     """The serialized keys must match the manifest schema exactly."""
     data = json.loads(_sample_manifest().to_json())
     assert data["schema_version"] == SCHEMA_VERSION
-    assert set(data) == {"schema_version", "tool_version", "created_at", "source", "filters", "counts", "objects"}
+    assert set(data) == {
+        "schema_version",
+        "tool_version",
+        "created_at",
+        "source",
+        "filters",
+        "counts",
+        "objects",
+        "errors",
+    }
     assert set(data["source"]) == {"server", "address", "port", "tm1py_version"}
     assert set(data["objects"][0]) == {"type", "name", "file", "sha256"}
+
+
+def test_errors_roundtrip_and_default_empty():
+    """errors serialize with the manifest and default to an empty list."""
+    manifest = _sample_manifest()
+    assert manifest.errors == []
+    manifest.errors.append({"type": "dimensions", "name": "Broken", "error": "boom"})
+    parsed = Manifest.from_json(manifest.to_json())
+    assert parsed.errors == [{"type": "dimensions", "name": "Broken", "error": "boom"}]
+
+
+def test_from_json_tolerates_manifest_without_errors():
+    """Older manifests (or hand-written ones) without an errors key still load."""
+    data = json.loads(_sample_manifest().to_json())
+    del data["errors"]
+    assert Manifest.from_json(json.dumps(data)).errors == []
 
 
 def test_created_at_defaults_to_utc_iso():
