@@ -1,4 +1,4 @@
-"""Tests for the CLI wiring and engine stubs."""
+"""Tests for the CLI wiring."""
 
 import pytest
 
@@ -66,13 +66,6 @@ def test_load_help_lists_all_options(capsys):
 def test_subcommands_dispatch_to_engine_stubs():
     assert build_parser().parse_args(["dump"]).func is dump_module.run_dump
     assert build_parser().parse_args(["load", "dump.zip"]).func is load_module.run_load
-
-
-def test_dump_stub_raises_not_implemented():
-    """The dump engine is issue #2's work; load is implemented (issue #3)."""
-    dump_args = build_parser().parse_args(["dump"])
-    with pytest.raises(NotImplementedError):
-        dump_module.run_dump(dump_args)
 
 
 def test_subcommand_required():

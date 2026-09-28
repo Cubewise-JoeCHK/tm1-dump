@@ -10,16 +10,17 @@ Shared zip-side contract (with the dump engine, issue #2):
 
 - ``data/<cube>.csv`` starts with ``# cube,<name>`` and
   ``# dimensions,<d1>,...`` header lines, followed by one row per cell
-  ``<e1>,...,<eN>,<value>``, written as RFC-4180 CSV (fields containing
-  commas must be quoted) so names and values with commas survive.
-- ``security/users.json`` is a list of TM1 ``/Users`` entity bodies,
-  ``security/groups.json`` a list of group names (or ``{"Name": ...}``
-  entities), ``security/client_groups.json`` a list of
-  ``{"client": ..., "groups": [...]}`` records, and
-  ``security/permissions.json`` a list of ``{"object_type", "object",
-  "group", "permission"}`` records where ``object_type`` is one of
-  ``cubes|dimensions|processes|chores`` and ``permission`` one of
-  ``NONE|READ|WRITE|RESERVE|LOCK|ADMIN`` (any case).
+  ``<e1>,...,<eN>,<value>``; parsed as RFC-4180 CSV so fields containing
+  commas survive when the writer quotes them.
+- ``security/users.json`` is a JSON array of TM1 ``/Users`` entity bodies,
+  ``security/groups.json`` a JSON array of group names (or
+  ``{"Name": ...}`` entities), ``security/client_groups.json`` the object
+  ``{client: [groups]}``, and ``security/permissions.json`` the object
+  ``{object_type: {object: {group: right}}}`` with ``object_type`` one of
+  ``cubes|dimensions|processes|chores`` and ``right`` the TM1 rights word
+  captured from the control cube (``NONE``, ``READ``, ``WRITE``,
+  ``RESERVE``, ``LOCK``, ...). Flat list variants of the two are accepted
+  as well.
 
 Group rights are replayed into the TM1 global-security control cubes
 (``}CubeSecurity``, ``}DimensionSecurity``, ``}ProcessSecurity``,
@@ -45,7 +46,7 @@ from TM1py.Objects import Chore, Cube, Dimension, MDXView, NativeView, Process, 
 from TM1py.Services import TM1Service
 
 from tm1_dump import zipio
-from tm1_dump.config import ConnectionConfig, resolve_connection
+from tm1_dump.config import DEFAULT_SSL, ConnectionConfig, resolve_connection
 from tm1_dump.manifest import Manifest, ManifestObject
 
 DEFAULT_WORKERS = 8
@@ -82,9 +83,6 @@ PERMISSION_CONTROL_CUBES: dict[str, str] = {
     zipio.TYPE_PROCESSES: "}ProcessSecurity",
     zipio.TYPE_CHORES: "}ChoreSecurity",
 }
-
-#: Rights accepted in permissions.json, normalized to upper case.
-VALID_PERMISSIONS: tuple[str, ...] = ("NONE", "READ", "WRITE", "RESERVE", "LOCK", "ADMIN")
 
 CHORES_DST_NOTICE = (
     "chore start times are applied in the target server's local timezone; "
@@ -231,7 +229,7 @@ def _connect(resolved: ConnectionConfig, workers: int) -> TM1Service:
         port=resolved.port,
         user=resolved.user,
         password=resolved.password,
-        ssl=True if resolved.ssl is None else resolved.ssl,
+        ssl=DEFAULT_SSL if resolved.ssl is None else resolved.ssl,
         namespace=resolved.namespace,
         connection_pool_size=max(10, workers + 2),
     )
@@ -565,7 +563,7 @@ def _load_security(
             failures.append(_Failure(zipio.TYPE_SECURITY, f"group {group!r}", _error_text(exc)))
 
     new_users: list[str] = []
-    for body in _read_security_json(archive, files, "users"):
+    for body in _read_security_json(archive, files, "users") or []:
         name = body.get("Name")
         try:
             if not name:
@@ -594,23 +592,16 @@ def _load_security(
             "so an admin must set real passwords before they can log in"
         )
 
-    for record in _read_security_json(archive, files, "client_groups"):
-        client = record.get("client") or record.get("user")
-        groups = record.get("groups") or []
+    memberships = list(_read_memberships(_read_security_json(archive, files, "client_groups")))
+    for client, groups in memberships:
         try:
-            if not client:
-                raise ValueError("membership record without a client")
             if groups:
                 tm1.security.add_user_to_groups(client, groups)  # additive on purpose
         except Exception as exc:
             failures.append(_Failure(zipio.TYPE_SECURITY, f"memberships of {client!r}", _error_text(exc)))
     notices.append("group memberships are applied additively (never removed) so loading cannot lock anyone out")
 
-    for record in _read_security_json(archive, files, "permissions"):
-        object_type = record.get("object_type")
-        object_name = record.get("object")
-        group = record.get("group")
-        permission = str(record.get("permission", "")).strip().upper()
+    for object_type, object_name, group, right in _iter_permissions(_read_security_json(archive, files, "permissions")):
         control_cube = PERMISSION_CONTROL_CUBES.get(object_type)
         try:
             if control_cube is None:
@@ -618,9 +609,9 @@ def _load_security(
                     f"unsupported permission object_type {object_type!r} "
                     f"(expected one of {sorted(PERMISSION_CONTROL_CUBES)})"
                 )
-            if permission not in VALID_PERMISSIONS:
-                raise ValueError(f"invalid permission {record.get('permission')!r} (expected one of {VALID_PERMISSIONS})")
-            tm1.cubes.cells.write_value(permission, control_cube, (group, object_name))
+            if not str(right or "").strip():
+                continue  # empty cell: no explicit right stored on the source
+            tm1.cubes.cells.write_value(str(right).strip(), control_cube, (group, object_name))
         except Exception as exc:
             failures.append(_Failure(zipio.TYPE_SECURITY, f"permission {group!r} on {object_name!r}", _error_text(exc)))
     return notices
@@ -639,18 +630,21 @@ def _update_user_profile(tm1: TM1Service, name: str, body: dict) -> None:
     tm1.security.update_user(user)
 
 
-def _read_security_json(archive: zipfile.ZipFile, files: dict[str, _Entry], file_name: str) -> list:
+def _read_security_json(archive: zipfile.ZipFile, files: dict[str, _Entry], file_name: str) -> Any:
     """Read one security/<name>.json; an absent file means nothing to load."""
     entry = files.get(file_name)
     if entry is None:
-        return []
+        return None
     return json.loads(archive.read(entry.file).decode("utf-8"))
 
 
 def _read_group_names(archive: zipfile.ZipFile, files: dict[str, _Entry]) -> list[str]:
     """Read groups.json, accepting plain names or REST entities."""
+    raw_groups = _read_security_json(archive, files, "groups")
+    if raw_groups is None:
+        return []
     names: list[str] = []
-    for item in _read_security_json(archive, files, "groups"):
+    for item in raw_groups:
         if isinstance(item, str):
             names.append(item)
         elif isinstance(item, dict) and item.get("Name"):
@@ -658,6 +652,50 @@ def _read_group_names(archive: zipfile.ZipFile, files: dict[str, _Entry]) -> lis
         else:
             raise ValueError(f"cannot read a group name from {item!r}")
     return names
+
+
+def _read_memberships(raw: Any) -> Iterator[tuple[str, list[str]]]:
+    """Yield (client, groups) from client_groups.json.
+
+    The dump engine writes ``{client: [groups]}``; a list of
+    ``{"client": ..., "groups": [...]}`` records is accepted too.
+    """
+    if not raw:
+        return
+    if isinstance(raw, dict):
+        for client, groups in raw.items():
+            yield client, list(groups or [])
+        return
+    for record in raw:
+        client = record.get("client") or record.get("user")
+        if not client:
+            raise ValueError("membership record without a client")
+        yield client, list(record.get("groups") or [])
+
+
+def _iter_permissions(raw: Any) -> Iterator[tuple[str, str, str, str]]:
+    """Yield (object_type, object, group, right) from permissions.json.
+
+    The dump engine writes ``{section: {object: {group: right}}}`` where
+    section is one of the :data:`PERMISSION_CONTROL_CUBES` keys; a flat
+    list of ``{"object_type", "object", "group", "permission"}`` records
+    is accepted too. Rights are replayed exactly as captured.
+    """
+    if not raw:
+        return
+    if isinstance(raw, dict):
+        for object_type, objects in raw.items():
+            for object_name, rights in (objects or {}).items():
+                for group, right in (rights or {}).items():
+                    yield object_type, object_name, group, right
+        return
+    for record in raw:
+        yield (
+            record.get("object_type"),
+            record.get("object"),
+            record.get("group"),
+            record.get("permission"),
+        )
 
 
 def _print_plan(
@@ -701,10 +739,10 @@ def _print_security_plan(tm1: TM1Service, archive: zipfile.ZipFile, entries: lis
     except ValueError:
         groups = []
     group_creates = [group for group in groups if not tm1.security.group_exists(group)]
-    users = [body.get("Name") for body in _read_security_json(archive, files, "users") if body.get("Name")]
+    users = [body.get("Name") for body in _read_security_json(archive, files, "users") or [] if body.get("Name")]
     user_creates = [name for name in users if not tm1.security.user_exists(name)]
-    memberships = _read_security_json(archive, files, "client_groups")
-    permissions = _read_security_json(archive, files, "permissions")
+    memberships = list(_read_memberships(_read_security_json(archive, files, "client_groups")))
+    permissions = list(_iter_permissions(_read_security_json(archive, files, "permissions")))
     print(
         f"  security: {len(groups)} groups ({len(group_creates)} create, {len(groups) - len(group_creates)} skip), "
         f"{len(users)} users ({len(user_creates)} create disabled with random password, "

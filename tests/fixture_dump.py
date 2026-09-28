@@ -117,11 +117,13 @@ def build_fixture_files() -> dict[str, bytes]:
     files[zipio.build_path(zipio.TYPE_SECURITY, "users")] = _json_bytes(
         [{"Name": "alice", "FriendlyName": "Alice"}, {"Name": "bob", "FriendlyName": "Bob"}]
     )
+    # {client: [groups]} — the dump engine's shape (see dump._client_groups_thunk)
     files[zipio.build_path(zipio.TYPE_SECURITY, "client_groups")] = _json_bytes(
-        [{"client": "alice", "groups": ["Planning", "Finance"]}]
+        {"alice": ["Planning", "Finance"]}
     )
+    # {object_type: {object: {group: right}}} — the dump engine's shape (dump._permissions_thunk)
     files[zipio.build_path(zipio.TYPE_SECURITY, "permissions")] = _json_bytes(
-        [{"object_type": "cubes", "object": "P&L", "group": "Planning", "permission": "read"}]
+        {"cubes": {"P&L": {"Planning": "READ"}}}
     )
 
     for path, payload in files.items():
