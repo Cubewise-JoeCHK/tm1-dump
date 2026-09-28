@@ -24,9 +24,10 @@ ENV_VARS = ("TM1_ADDRESS", "TM1_PORT", "TM1_USER", "TM1_PASSWORD", "TM1_SSL", "T
 class FakeBody:
     """Stand-in for a TM1py object exposing .name and .body."""
 
-    def __init__(self, name: str, body: str) -> None:
+    def __init__(self, name: str, body: str, hierarchies: list | None = None) -> None:
         self.name = name
         self.body = body
+        self.hierarchies = hierarchies or []  # the dump reads element attributes off each hierarchy
 
 
 class FakeDimensionService:

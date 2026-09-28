@@ -196,12 +196,31 @@ def _collect_dimension_jobs(tm1: TM1Service, filters: dict) -> list[Job]:
 
 
 def _dimension_thunk(tm1: TM1Service, name: str) -> Callable[[], list[ExportRecord]]:
-    """Fetch one dimension entity with all hierarchies (incl. attributes) expanded."""
+    """Build a thunk fetching one dimension with all hierarchies expanded."""
 
     def thunk() -> list[ExportRecord]:
-        return [(zipio.TYPE_DIMENSIONS, name, None, tm1.dimensions.get(name).body)]
+        return [(zipio.TYPE_DIMENSIONS, name, None, _dimension_body(tm1.dimensions.get(name)))]
 
     return thunk
+
+
+def _dimension_body(dimension) -> str:
+    """Serialize one dimension entity including its element attributes.
+
+    TM1py's ``Dimension.body`` omits ``ElementAttributes`` on every
+    hierarchy (attributes could not be created in one batch on old TM1
+    versions, so TM1py drops them on re-serialization); they are
+    re-attached here so they survive the zip.
+    """
+    body = json.loads(dimension.body)
+    for hierarchy, hierarchy_body in zip(dimension.hierarchies, body.get("Hierarchies", []), strict=False):
+        attributes = [
+            {"Name": attribute.name, "Type": str(attribute.attribute_type)}
+            for attribute in hierarchy.element_attributes
+        ]
+        if attributes:
+            hierarchy_body["ElementAttributes"] = attributes
+    return json.dumps(body)
 
 
 def _object_body_thunk(object_type: str, tm1_object) -> Callable[[], list[ExportRecord]]:
