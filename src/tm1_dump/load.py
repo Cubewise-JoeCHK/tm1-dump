@@ -3,8 +3,9 @@
 The CLI dispatches here via :func:`run_load`. The zip is read directly
 (no extraction) and every file's sha256 is verified against the manifest
 before the server is touched. Objects reload in dependency order —
-dimensions, cubes (+ rules), views, subsets, processes, chores, data,
-security — parallel within each type, sequential across types.
+dimensions, cubes (+ rules), subsets, views, processes, chores, data,
+security — parallel within each type, sequential across types. Subsets
+come before views because a native view can reference named subsets.
 
 Shared zip-side contract (with the dump engine, issue #2):
 
@@ -53,12 +54,14 @@ DEFAULT_WORKERS = 8
 DATA_CHUNK_ROWS = 10_000
 RANDOM_PASSWORD_CHARS = 16
 
-#: Phases run sequentially, in dependency order.
+#: Phases run sequentially, in dependency order. Subsets precede views:
+#: a native view can bind named subsets, which must exist before the view
+#: is created.
 LOAD_ORDER: tuple[str, ...] = (
     zipio.TYPE_DIMENSIONS,
     zipio.TYPE_CUBES,
-    zipio.TYPE_VIEWS,
     zipio.TYPE_SUBSETS,
+    zipio.TYPE_VIEWS,
     zipio.TYPE_PROCESSES,
     zipio.TYPE_CHORES,
     zipio.TYPE_DATA,
@@ -88,6 +91,8 @@ CHORES_DST_NOTICE = (
     "chore start times are applied in the target server's local timezone; "
     "across a DST change the absolute time can shift by an hour"
 )
+
+GROUP_DIMENSION_NAME = "}groups"  # compared case-insensitively, mirrors dump.py
 
 
 class _Failure(NamedTuple):
@@ -580,6 +585,7 @@ def _load_security(
                     friendly_name=body.get("FriendlyName") or name,
                     password=secrets.token_urlsafe(RANDOM_PASSWORD_CHARS),
                     enabled=False,
+                    user_type=body.get("Type") or None,  # keep Admin-type users admin
                 )
                 tm1.security.create_user(new_user)
         except Exception as exc:
@@ -601,6 +607,11 @@ def _load_security(
             failures.append(_Failure(zipio.TYPE_SECURITY, f"memberships of {client!r}", _error_text(exc)))
     notices.append("group memberships are applied additively (never removed) so loading cannot lock anyone out")
 
+    # rights land in the control cube's real dimension order — fetch it once per cube
+    control_dimensions = {
+        control_cube: [str(name) for name in tm1.cubes.get_dimension_names(control_cube)]
+        for control_cube in PERMISSION_CONTROL_CUBES.values()
+    }
     for object_type, object_name, group, right in _iter_permissions(_read_security_json(archive, files, "permissions")):
         control_cube = PERMISSION_CONTROL_CUBES.get(object_type)
         try:
@@ -611,10 +622,26 @@ def _load_security(
                 )
             if not str(right or "").strip():
                 continue  # empty cell: no explicit right stored on the source
-            tm1.cubes.cells.write_value(str(right).strip(), control_cube, (group, object_name))
+            coords = _permission_element_tuple(control_dimensions[control_cube], group, object_name)
+            tm1.cubes.cells.write_value(str(right).strip(), control_cube, coords)
         except Exception as exc:
             failures.append(_Failure(zipio.TYPE_SECURITY, f"permission {group!r} on {object_name!r}", _error_text(exc)))
     return notices
+
+
+def _permission_element_tuple(dimension_names: list[str], group: str, object_name: str) -> tuple[str, ...]:
+    """Place the (object, group) pair in the control cube's dimension order.
+
+    The rights control cubes pair a secured-objects dimension with
+    ``}Groups``, but not always in the same order (``}ChoreSecurity`` lists
+    ``}Groups`` first); the dump engine locates the group column by name,
+    so the load engine mirrors that instead of hardcoding a position.
+    """
+    group_index = next(
+        (index for index, name in enumerate(dimension_names) if str(name).strip().lower() == GROUP_DIMENSION_NAME),
+        len(dimension_names) - 1,
+    )
+    return tuple(group if index == group_index else object_name for index in range(len(dimension_names)))
 
 
 def _update_user_profile(tm1: TM1Service, name: str, body: dict) -> None:

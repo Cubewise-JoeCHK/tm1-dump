@@ -15,8 +15,8 @@ from tm1_dump import zipio
 PHASE_KINDS = [
     zipio.TYPE_DIMENSIONS,
     zipio.TYPE_CUBES,
-    zipio.TYPE_VIEWS,
     zipio.TYPE_SUBSETS,
+    zipio.TYPE_VIEWS,
     zipio.TYPE_PROCESSES,
     zipio.TYPE_CHORES,
     zipio.TYPE_DATA,
@@ -349,14 +349,18 @@ def test_security_loads_groups_users_memberships_permissions_in_order(fixture_zi
 
 
 def test_security_permissions_written_to_control_cubes(fixture_zip_path, install_fake_tm1):
-    """Group rights land in the TM1 global-security control cubes, upper-cased."""
+    """Group rights land in the TM1 global-security control cubes.
+
+    The element tuple follows the control cube's real dimension order:
+    }CubeSecurity is (}Cubes, }Groups), so the object comes first.
+    """
     fake = install_fake_tm1()
     assert load_module.run_load(load_args(fixture_zip_path)) == 0
     assert (
         "write_value",
         "data",
         "}CubeSecurity",
-        repr(("READ", ("Planning", "P&L"))),
+        repr(("READ", ("P&L", "Planning"))),
     ) in fake.calls
 
 
