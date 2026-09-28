@@ -8,4 +8,6 @@ build/
 .pytest_cache/
 .ruff_cache/
 *.zip
+# the contract-valid load-test fixture is committed on purpose (see tests/fixture_dump.py)
+!tests/fixtures/*.zip
 uv.lock
