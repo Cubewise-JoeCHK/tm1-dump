@@ -68,13 +68,11 @@ def test_subcommands_dispatch_to_engine_stubs():
     assert build_parser().parse_args(["load", "dump.zip"]).func is load_module.run_load
 
 
-def test_engine_stubs_raise_not_implemented():
+def test_dump_stub_raises_not_implemented():
+    """The dump engine is issue #2's work; load is implemented (issue #3)."""
     dump_args = build_parser().parse_args(["dump"])
-    load_args = build_parser().parse_args(["load", "dump.zip"])
     with pytest.raises(NotImplementedError):
         dump_module.run_dump(dump_args)
-    with pytest.raises(NotImplementedError):
-        load_module.run_load(load_args)
 
 
 def test_subcommand_required():
