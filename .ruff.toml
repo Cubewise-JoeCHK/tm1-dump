@@ -1,0 +1,29 @@
+# Canonical Ruff config — distilled from /proj (tm1craft, tm1-knowledge,
+# tm1-treesitter, allo, cubewise_tool).
+line-length = 120
+indent-width = 4
+target-version = "py310"
+
+src = ["src", "tests"]
+
+[lint]
+# Pyflakes (F), Error (E), Isort (I), PEP8-naming (N), Warnings (W),
+# flake8-bugbear (B), pyupgrade (UP)
+select = ["E", "F", "I", "N", "W", "B", "UP"]
+ignore = [
+    "E501",  # Line length is handled by the formatter
+]
+fixable = ["ALL"]
+unfixable = []
+
+[lint.isort]
+known-first-party = ["tm1_dump"]
+
+[lint.per-file-ignores]
+"__init__.py" = ["E402"]
+"**/{tests,docs,tools}/*" = ["E402"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
