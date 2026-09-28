@@ -15,6 +15,9 @@ from dataclasses import dataclass, fields
 
 CONFIG_SECTION = "tm1"
 
+#: TM1 servers default to SSL; ``--no-ssl`` / ``TM1_SSL=false`` / ini turn it off.
+DEFAULT_SSL = True
+
 ENV_ADDRESS = "TM1_ADDRESS"
 ENV_PORT = "TM1_PORT"
 ENV_USER = "TM1_USER"

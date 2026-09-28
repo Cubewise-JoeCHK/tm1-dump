@@ -10,7 +10,8 @@ engine wrote. Schema:
       "source": {"server": ..., "address": ..., "port": ..., "tm1py_version": ...},
       "filters": {...},
       "counts": {"dimensions": 12, "cubes": 3, ...},
-      "objects": [{"type": ..., "name": ..., "file": ..., "sha256": ...}]
+      "objects": [{"type": ..., "name": ..., "file": ..., "sha256": ...}],
+      "errors": [{"type": ..., "name": ..., "error": ...}]     # objects that failed to export
     }
 """
 
@@ -60,6 +61,8 @@ class Manifest:
     filters: dict[str, Any] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
     objects: list[ManifestObject] = field(default_factory=list)
+    #: Objects that failed to export: ``[{"type": ..., "name": ..., "error": ...}]``.
+    errors: list[dict[str, str]] = field(default_factory=list)
 
     def to_json(self) -> str:
         """Serialize the manifest to an indented JSON string."""
@@ -83,4 +86,5 @@ class Manifest:
             filters=data["filters"],
             counts=data["counts"],
             objects=[ManifestObject(**entry) for entry in data["objects"]],
+            errors=data.get("errors", []),
         )
