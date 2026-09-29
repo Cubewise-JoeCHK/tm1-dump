@@ -53,8 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "cherry-pick: load only objects matching PATTERN; repeatable; TYPE is one of the zip "
             "sections or a bare PATTERN applies to every type; dependencies are auto-pulled from "
-            "the zip (a selected cube brings its dimensions and data); security loads only when "
-            "explicitly selected"
+            "the zip (a selected cube brings its dimensions and data, a view its named subsets); "
+            "security loads only when explicitly selected"
         ),
     )
     load_parser.add_argument(

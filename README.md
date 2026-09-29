@@ -106,7 +106,7 @@ server.
 prerequisites are **auto-pulled from the zip** so a partial load does not die on them:
 
 - a selected cube brings its dimensions and its `data/<cube>.csv`
-- a selected view brings its cube (whose dimensions and data follow)
+- a selected view brings its cube (whose dimensions and data follow) and the named subsets it references
 - a selected subset brings its dimension
 - a selected chore brings its tasks' processes
 - security is never auto-pulled — it loads only when explicitly selected (`security=...`)
@@ -207,7 +207,7 @@ stay a single segment (`weird/name` → `weird%2Fname`).
 
 ```bash
 uv sync
-uv run pytest          # 175 tests, incl. a mocked dump→load roundtrip
+uv run pytest          # 181 tests, incl. a mocked dump→load roundtrip
 uv run ruff check .    # lint
 uv build               # sdist + wheel
 ```
