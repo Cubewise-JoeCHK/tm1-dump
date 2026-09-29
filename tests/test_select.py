@@ -11,6 +11,8 @@ tasking Import actuals; data for P&L; the four security files).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import zipfile
 
 from conftest import load_args
@@ -180,6 +182,129 @@ def test_case_insensitive_matching(fixture_zip_path):
     selection = plan(fixture_zip_path, include=["cubes=p&l"])
     assert names(selection, zipio.TYPE_CUBES) == ["P&L"]
     assert len(names(selection, zipio.TYPE_DIMENSIONS)) == 2
+
+
+def _view_zip(tmp_path) -> str:
+    """A small dump zip whose native view binds two named subsets.
+
+    Cube Stuff over Color(Red, Blue) + Size(Big, Small); subsets Warm and
+    Cool on Color, Big on Size; native view Main binding Warm (rows) and
+    Big (columns) — Cool is a decoy no view references.
+    """
+    from TM1py.Objects import Cube, Dimension, Element, Hierarchy, NativeView, Subset
+
+    from tm1_dump.manifest import Manifest, ManifestObject, SourceInfo
+
+    files: dict[str, bytes] = {}
+    for dimension_name, element_names in (("Color", ["Red", "Blue"]), ("Size", ["Big", "Small"])):
+        dimension = Dimension(
+            name=dimension_name,
+            hierarchies=[
+                Hierarchy(
+                    name=dimension_name,
+                    dimension_name=dimension_name,
+                    elements=[Element(element, "Numeric") for element in element_names],
+                )
+            ],
+        )
+        files[zipio.build_path(zipio.TYPE_DIMENSIONS, dimension_name)] = dimension.body.encode("utf-8")
+
+    cube = Cube(name="Stuff", dimensions=["Color", "Size"])
+    files[zipio.build_path(zipio.TYPE_CUBES, "Stuff")] = cube.body.encode("utf-8")
+
+    for subset_name, dimension_name in (("Warm", "Color"), ("Cool", "Color"), ("Big", "Size")):
+        subset = Subset(subset_name=subset_name, dimension_name=dimension_name, elements=["Red"])
+        files[zipio.build_path(zipio.TYPE_SUBSETS, subset_name, (dimension_name, dimension_name))] = (
+            subset.body.encode("utf-8")
+        )
+
+    view = NativeView(cube_name="Stuff", view_name="Main")
+    view.add_row("Color", Subset(subset_name="Warm", dimension_name="Color"))
+    view.add_column("Size", Subset(subset_name="Big", dimension_name="Size"))
+    view.add_title("Size", "Big", Subset(subset_name="Big", dimension_name="Size"))
+    files[zipio.build_path(zipio.TYPE_VIEWS, "Main", "Stuff")] = view.body.encode("utf-8")
+
+    manifest = Manifest(
+        tool_version="0.1.0-test",
+        source=SourceInfo(server="viewzip", address="viewzip.internal", port=12354, tm1py_version="2.4.1"),
+    )
+    for path, payload in files.items():
+        resolved = zipio.resolve_path(path)
+        manifest.objects.append(
+            ManifestObject(type=resolved.object_type, name=resolved.name, file=path, sha256=hashlib.sha256(payload).hexdigest())
+        )
+    files[zipio.MANIFEST_NAME] = manifest.to_json().encode("utf-8")
+
+    zip_path = tmp_path / "view_dump.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        for path_in_zip, payload in files.items():
+            archive.writestr(path_in_zip, payload)
+    return str(zip_path)
+
+
+def test_view_subset_references_reads_both_body_shapes():
+    """Subset refs are collected from @odata.bind and expanded JSON alike."""
+    bind_view = json.dumps(
+        {
+            "Name": "Main",
+            "Rows": [{"Subset@odata.bind": "Dimensions('Color')/Hierarchies('Color')/Subsets('Warm')"}],
+            "Columns": [{"Subset@odata.bind": "Dimensions('Size')/Hierarchies('Size')/Subsets('Big')"}],
+            "Titles": [],
+        }
+    )
+    expanded_view = json.dumps(
+        {
+            "Name": "Main",
+            "Rows": [{"Subset": {"Name": "Warm", "Hierarchy": {"Name": "Color", "Dimension": {"Name": "Color"}}}}],
+            "Columns": [],
+            "Titles": [],
+        }
+    )
+    mdx_view = json.dumps({"Name": "Mdx", "MDX": "SELECT {[Color].[Color].[Red]} ON 0 FROM [Stuff]"})
+    assert load_module._view_subset_references(bind_view) == [("Color", "Color", "Warm"), ("Size", "Size", "Big")]
+    assert load_module._view_subset_references(expanded_view) == [("Color", "Color", "Warm")]
+    assert load_module._view_subset_references(mdx_view) == []
+
+
+def test_selected_view_pulls_the_named_subsets_it_references(tmp_path):
+    """views=Main brings its cube, its dimensions and exactly the bound
+    subsets — the unreferenced decoy subset stays behind."""
+    zip_path = _view_zip(tmp_path)
+    selection = plan(zip_path, include=["views=Main"])
+    assert names(selection, zipio.TYPE_VIEWS) == ["Main"]
+    assert names(selection, zipio.TYPE_CUBES) == ["Stuff"]
+    assert names(selection, zipio.TYPE_DIMENSIONS) == ["Color", "Size"]
+    assert names(selection, zipio.TYPE_SUBSETS) == ["Warm", "Big"]
+    assert_pulled(selection, zipio.TYPE_SUBSETS, "Warm", "views/Main")
+    assert_pulled(selection, zipio.TYPE_SUBSETS, "Big", "views/Main")
+    assert "Cool" not in names(selection, zipio.TYPE_SUBSETS)
+
+
+def test_excluded_subset_wins_over_view_pull(tmp_path):
+    """--exclude subsets=Warm keeps it out; the view stays selected and its
+    load fails per-object on a fresh target (documented error isolation)."""
+    zip_path = _view_zip(tmp_path)
+    selection = plan(zip_path, include=["views=Main"], exclude=["subsets=Warm"])
+    assert names(selection, zipio.TYPE_VIEWS) == ["Main"]
+    assert names(selection, zipio.TYPE_SUBSETS) == ["Big"]
+
+
+def test_narrowed_subsets_include_limits_view_pull(tmp_path):
+    """A --include subsets=... pattern keeps its narrowing: Warm is a direct
+    selection and the other bound subset is suppressed, like the dims rule."""
+    zip_path = _view_zip(tmp_path)
+    selection = plan(zip_path, include=["views=Main", "subsets=Warm"])
+    assert names(selection, zipio.TYPE_SUBSETS) == ["Warm"]
+    warm = next(item for item in selection.entries_by_type[zipio.TYPE_SUBSETS] if item.name == "Warm")
+    assert warm.file not in selection.auto_notes
+
+
+def test_view_referencing_a_subset_twice_pulls_it_once(tmp_path):
+    """A subset bound on two axes (column + title) carries the puller once."""
+    zip_path = _view_zip(tmp_path)
+    selection = plan(zip_path, include=["views=Main"])
+    big = next(item for item in selection.entries_by_type[zipio.TYPE_SUBSETS] if item.name == "Big")
+    assert selection.auto_notes[big.file] == ["views/Main"]
 
 
 # --- end-to-end through run_load -------------------------------------------------

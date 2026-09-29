@@ -639,8 +639,29 @@ def test_roundtrip_dry_run_lists_selection_and_multi_pullers(roundtrip_env, tmp_
     assert "views: Simple (selected), Top Revenue (selected)" in output
     assert "cubes: P&L (auto: needed by views/Simple, views/Top Revenue)" in output
     assert "dimensions: Account (auto: needed by cubes/P&L), Month (auto: needed by cubes/P&L)" in output
+    assert "subsets: Top Lines (auto: needed by views/Simple), All Months (auto: needed by views/Simple)" in output
     assert "data: P&L (auto: needed by cubes/P&L)" in output
     assert "security:" not in output
+
+
+def test_roundtrip_view_only_cherry_pick_pulls_referenced_subsets(roundtrip_env, tmp_path, capsys):
+    """--include views=Simple: the fresh target gets the view, its cube, its
+    dimensions and exactly the named subsets it binds — load exits 0."""
+    source, target = roundtrip_env
+    zip_path = str(tmp_path / "roundtrip.zip")
+    assert dump_module.run_dump(_dump_args(zip_path)) == 0
+
+    assert load_module.run_load(load_args(zip_path, "--include", "views=Simple")) == 0
+    assert "load complete: no failures" in capsys.readouterr().out
+
+    assert [view.name for view in target.views.get_all("P&L")[1]] == ["Simple"]
+    assert {cube.name for cube in target.cubes.get_all()} == {"P&L"}
+    assert set(target.dimensions.get_all_names()) == {"Account", "Month"}
+    assert target.subsets.get_all_names("Account", "Account") == ["Top Lines"]
+    assert target.subsets.get_all_names("Month", "Month") == ["All Months"]
+    assert "Numeric" not in target.subsets.get_all_names("Account", "Account")
+    assert target.read_cells("P&L") == source.read_cells("P&L")  # data follows the cube
+    assert target.security.get_all_groups() == []
 
 
 def test_roundtrip_no_data_keeps_attribute_values(monkeypatch, tmp_path, capsys):

@@ -10,8 +10,9 @@ come before views because a native view can reference named subsets.
 With ``--include``/``--exclude`` (issue #11) the load becomes a
 cherry-pick: the same filter syntax as ``dump`` selects objects per type,
 and every selection is completed from inside the zip — a selected cube
-pulls its dimensions and data, a selected view its cube, a selected
-subset its dimension, a selected chore its tasks' processes. Security is
+pulls its dimensions and data, a selected view its cube and the named
+subsets it references, a selected subset its dimension, a selected chore
+its tasks' processes. Security is
 never auto-pulled; with filters active it loads only when explicitly
 selected. :func:`plan_selection` computes that effective selection before
 the server is contacted.
@@ -297,8 +298,9 @@ def plan_selection(
     opt-in, loading only the objects its own patterns name plus the
     dependencies auto-pulled from inside the zip — a selected cube pulls
     its dimensions and its data file, a selected view its cube (whose
-    dimensions and data follow), a selected subset its dimension, a
-    selected chore its tasks' processes. Security is never auto-pulled.
+    dimensions and data follow) plus the named subsets it references, a
+    selected subset its dimension, a selected chore its tasks' processes.
+    Security is never auto-pulled.
     ``--exclude`` without ``--include`` keeps load-everything and merely
     drops the excluded objects, like the dump filters. With no filters at
     all everything is selected, exactly as an unfiltered load.
@@ -329,7 +331,7 @@ def plan_selection(
         if pulled_by is not None and not object_allowed(entry.name, filters, entry.object_type):
             return
         if entry.file in selected_files:
-            if pulled_by and entry.file in auto_notes:
+            if pulled_by and entry.file in auto_notes and pulled_by not in auto_notes[entry.file]:
                 auto_notes[entry.file].append(pulled_by)
             return
         selected_files.add(entry.file)
@@ -345,6 +347,10 @@ def plan_selection(
     dimension_by_name = {entry.name.lower(): entry for entry in entries_by_type.get(zipio.TYPE_DIMENSIONS, [])}
     process_by_name = {entry.name.lower(): entry for entry in entries_by_type.get(zipio.TYPE_PROCESSES, [])}
     data_by_name = {entry.name.lower(): entry for entry in entries_by_type.get(zipio.TYPE_DATA, [])}
+    subset_by_key = {
+        (entry.parents[0].lower(), entry.parents[1].lower(), entry.name.lower()): entry
+        for entry in entries_by_type.get(zipio.TYPE_SUBSETS, [])
+    }
 
     # selected views pull their cube
     for entry in direct[zipio.TYPE_VIEWS]:
@@ -362,6 +368,22 @@ def plan_selection(
         data = data_by_name.get(cube_entry.name.lower())
         if data:
             take(data, f"{zipio.TYPE_CUBES}/{cube_entry.name}")
+
+    # selected views pull the named subsets they reference — a native view
+    # cannot be created without its bound subsets. Each pulled subset chains
+    # to its dimension, but silently when that dimension is already selected
+    # (a view axis is always one of the cube's dimensions, which the cube
+    # pull brought in); the chain is a net for inconsistent zip contents.
+    for entry in selected.get(zipio.TYPE_VIEWS, []):
+        for dimension_name, hierarchy_name, subset_name in _view_subset_references(
+            archive.read(entry.file).decode("utf-8")
+        ):
+            subset = subset_by_key.get((dimension_name.lower(), hierarchy_name.lower(), subset_name.lower()))
+            if subset:
+                take(subset, f"{zipio.TYPE_VIEWS}/{entry.name}")
+                dimension = dimension_by_name.get(subset.parents[0].lower())
+                if dimension and dimension.file not in selected_files:
+                    take(dimension, f"{zipio.TYPE_SUBSETS}/{subset.name}")
 
     # selected subsets pull their dimension
     for entry in direct[zipio.TYPE_SUBSETS]:
@@ -457,6 +479,40 @@ def _chore_process_names(text: str) -> list[str]:
         elif isinstance(task.get("Process"), dict) and task["Process"].get("Name"):
             names.append(task["Process"]["Name"])
     return names
+
+
+def _view_subset_references(text: str) -> list[tuple[str, str, str]]:
+    """(dimension, hierarchy, subset) triples a view body references.
+
+    Native views bind named subsets on their Rows/Columns/Titles; the view
+    cannot be created without them. Handles both the TM1py ``.body`` shape
+    (``Subset@odata.bind``) and the expanded REST entity
+    (``Subset: {Name, Hierarchy: {Name, Dimension: {Name}}}``). MDX views
+    reference elements directly, so they yield nothing here.
+    """
+    body = json.loads(text)
+    references: list[tuple[str, str, str]] = []
+    for axis in ("Rows", "Columns", "Titles"):
+        for placement in body.get(axis) or []:
+            bind = placement.get("Subset@odata.bind")
+            if bind:
+                parts = bind.split("/")
+                if len(parts) == 3:
+                    dimension_bind, hierarchy_bind, subset_bind = parts
+                    references.append(
+                        (_bind_name(dimension_bind), _bind_name(hierarchy_bind), _bind_name(subset_bind))
+                    )
+                continue
+            subset = placement.get("Subset")
+            if isinstance(subset, dict):
+                hierarchy = subset.get("Hierarchy") or {}
+                dimension = hierarchy.get("Dimension") or {}
+                dimension_name = dimension.get("Name")
+                hierarchy_name = hierarchy.get("Name")
+                subset_name = subset.get("Name")
+                if dimension_name and hierarchy_name and subset_name:
+                    references.append((dimension_name, hierarchy_name, subset_name))
+    return references
 
 
 def _print_selection(selection: Selection) -> None:
