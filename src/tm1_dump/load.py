@@ -47,7 +47,7 @@ from TM1py.Objects import Chore, Cube, Dimension, MDXView, NativeView, Process, 
 from TM1py.Services import TM1Service
 
 from tm1_dump import zipio
-from tm1_dump.config import DEFAULT_SSL, ConnectionConfig, resolve_connection
+from tm1_dump.config import DEFAULT_SSL, ConnectionConfig, connection_problem, resolve_connection
 from tm1_dump.manifest import Manifest, ManifestObject
 
 DEFAULT_WORKERS = 8
@@ -148,7 +148,7 @@ def run_load(args: argparse.Namespace) -> int:
             return 1
 
         resolved = resolve_connection(args)
-        problem = _connection_problem(resolved)
+        problem = connection_problem(resolved)
         if problem:
             print(f"tm1-dump: {problem}", file=sys.stderr)
             return 1
@@ -205,26 +205,6 @@ def _verify_archive(archive: zipfile.ZipFile, manifest: Manifest) -> list[str]:
                 f"resolves to {resolved.object_type} {resolved.name!r}"
             )
     return problems
-
-
-def _connection_problem(resolved: ConnectionConfig) -> str | None:
-    """Return why the resolved connection cannot be used, or None."""
-    missing = [
-        flag
-        for flag, value in (
-            ("--address / TM1_ADDRESS", resolved.address),
-            ("--port / TM1_PORT", resolved.port),
-            ("--user / TM1_USER", resolved.user),
-        )
-        if value is None
-    ]
-    if missing:
-        return (
-            "no target server: missing "
-            + ", ".join(missing)
-            + " (pass CLI flags, set env vars, or use --config-file)"
-        )
-    return None
 
 
 def _connect(resolved: ConnectionConfig, workers: int) -> TM1Service:
