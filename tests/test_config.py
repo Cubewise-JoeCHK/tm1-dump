@@ -3,8 +3,9 @@
 import argparse
 
 import pytest
+import requests
 
-from tm1_dump.config import ConnectionConfig, resolve_connection
+from tm1_dump.config import SSL_HINT, ConnectionConfig, connection_error_text, describe_connection, resolve_connection
 
 ENV_VARS = ("TM1_ADDRESS", "TM1_PORT", "TM1_USER", "TM1_PASSWORD", "TM1_SSL", "TM1_NAMESPACE")
 
@@ -97,3 +98,94 @@ def test_ssl_boolean_parsing(monkeypatch, raw):
     monkeypatch.setenv("TM1_SSL", raw)
     resolved = resolve_connection(_args())
     assert resolved.ssl is (raw.strip().lower() in {"1", "true", "yes", "on"})
+
+
+# --------------------------------------------------------------------------- diagnostics (issue #14)
+
+
+def test_describe_connection_shows_file_source_and_no_password(tmp_path):
+    config_file = _write_config(
+        tmp_path,
+        "[tm1]\naddress = file.tm1\nport = 11111\nuser = admin\npassword = s3cret-hunter2\nssl = false\n",
+    )
+    args = _args(config_file=config_file)
+    line = describe_connection(resolve_connection(args), args)
+    assert line == f"target: file.tm1:11111 ssl=off user=admin (config: {config_file})"
+    assert "s3cret-hunter2" not in line
+
+
+def test_describe_connection_discovered_file_wins_label(tmp_path, monkeypatch):
+    for name in ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.ini").write_text("[tm1]\naddress = disc.tm1\nport = 22222\nuser = ops\n", encoding="utf-8")
+    args = _args(address="cli.tm1", port=33333, user="cliuser", password="s3cret-hunter2")
+    line = describe_connection(resolve_connection(args), args)
+    # the file path wins the label even though the CLI values win the precedence
+    assert line == f"target: cli.tm1:33333 ssl=on user=cliuser (config: {tmp_path / 'config.ini'})"
+    assert "s3cret-hunter2" not in line
+
+
+def test_describe_connection_env_source(tmp_path, monkeypatch):
+    for name in ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)  # no config.ini here
+    monkeypatch.setenv("TM1_ADDRESS", "env.tm1")
+    line = describe_connection(resolve_connection(_args()), _args())
+    assert line.endswith("(config: env)")
+
+
+def test_describe_connection_cli_source(tmp_path, monkeypatch):
+    for name in ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    args = _args(address="cli.tm1", port=33333, user="u", password="s3cret-hunter2")
+    line = describe_connection(resolve_connection(args), args)
+    assert line.endswith("(config: cli)")
+    assert "s3cret-hunter2" not in line
+
+
+def test_describe_connection_defaults_source(tmp_path, monkeypatch):
+    for name in ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    args = _args()
+    line = describe_connection(resolve_connection(args), args)
+    assert line.endswith("(config: defaults)")
+
+
+def test_connection_error_text_appends_hint_on_ssl_error():
+    error = requests.exceptions.SSLError("handshake failed: WRONG_VERSION_NUMBER")
+    text = connection_error_text(error)
+    assert text.startswith("handshake failed: WRONG_VERSION_NUMBER")  # original text stays visible
+    assert text.endswith(SSL_HINT)
+
+
+def test_connection_error_text_wrapped_ssl_error():
+    """An SSL error TM1py wrapped into another exception still gains the hint."""
+    try:
+        raise requests.exceptions.SSLError("WRONG_VERSION_NUMBER")
+    except requests.exceptions.SSLError as inner:
+        wrapped = RuntimeError("cannot connect to TM1")
+        wrapped.__cause__ = inner  # assigned inside the block: Python deletes `inner` at block exit
+    assert SSL_HINT in connection_error_text(wrapped)
+
+
+def test_connection_error_text_wrapped_via_context():
+    """The __context__ chain counts too (raise inside an except block, no from)."""
+    try:
+        raise requests.exceptions.SSLError("WRONG_VERSION_NUMBER")
+    except requests.exceptions.SSLError:
+        try:
+            raise RuntimeError("connect failed")  # __context__ is set on raise
+        except RuntimeError as caught:
+            wrapped = caught
+    assert SSL_HINT in connection_error_text(wrapped)
+
+
+def test_connection_error_text_other_failures_unchanged():
+    assert connection_error_text(RuntimeError("connection refused")) == "connection refused"
+    assert connection_error_text(RuntimeError()) == "RuntimeError"  # empty message: class name
+    hint_free = connection_error_text(ValueError("bad port"))
+    assert "bad port" in hint_free
+    assert SSL_HINT not in hint_free

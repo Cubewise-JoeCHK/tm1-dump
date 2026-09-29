@@ -35,7 +35,14 @@ import TM1py
 from TM1py import TM1Service
 
 from tm1_dump import zipio
-from tm1_dump.config import DEFAULT_SSL, ConnectionConfig, connection_problem, resolve_connection
+from tm1_dump.config import (
+    DEFAULT_SSL,
+    ConnectionConfig,
+    connection_error_text,
+    connection_problem,
+    describe_connection,
+    resolve_connection,
+)
 from tm1_dump.filters import object_allowed, parse_filters
 from tm1_dump.manifest import Manifest, ManifestObject, SourceInfo
 
@@ -407,10 +414,11 @@ def run_dump(args: argparse.Namespace) -> int:
     if problem:
         print(f"tm1-dump: {problem}", file=sys.stderr)
         return 2
+    print(describe_connection(conn, args), file=sys.stderr)
     try:
         tm1 = _connect(conn)
     except Exception as error:
-        print(f"tm1-dump: error: cannot connect to TM1: {error}", file=sys.stderr)
+        print(f"tm1-dump: error: cannot connect to TM1: {connection_error_text(error)}", file=sys.stderr)
         return 2
 
     try:

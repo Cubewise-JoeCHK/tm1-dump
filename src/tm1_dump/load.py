@@ -58,7 +58,14 @@ from TM1py.Objects import Chore, Cube, Dimension, MDXView, NativeView, Process, 
 from TM1py.Services import TM1Service
 
 from tm1_dump import zipio
-from tm1_dump.config import DEFAULT_SSL, ConnectionConfig, connection_problem, resolve_connection
+from tm1_dump.config import (
+    DEFAULT_SSL,
+    ConnectionConfig,
+    connection_error_text,
+    connection_problem,
+    describe_connection,
+    resolve_connection,
+)
 from tm1_dump.filters import ALL_TYPES, object_allowed, parse_filters
 from tm1_dump.manifest import Manifest, ManifestObject
 
@@ -192,11 +199,12 @@ def run_load(args: argparse.Namespace) -> int:
             _print_selection(selection)
 
         workers = args.workers or DEFAULT_WORKERS
+        print(describe_connection(resolved, args), file=sys.stderr)
         try:
             tm1 = _connect(resolved, workers)
         except Exception as exc:
             print(
-                f"tm1-dump: cannot connect to {resolved.address}:{resolved.port}: {_error_text(exc)}",
+                f"tm1-dump: cannot connect to {resolved.address}:{resolved.port}: {connection_error_text(exc)}",
                 file=sys.stderr,
             )
             return 1

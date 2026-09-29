@@ -6,6 +6,7 @@ import json
 import zipfile
 
 import pytest
+import requests
 
 from conftest import load_args
 from fixture_dump import FIXED_ZIP_DATE, FIXTURE_ZIP_PATH, build_fixture_files, write_fixture_zip
@@ -467,3 +468,45 @@ def test_ssl_defaults_on_and_flag_turns_it_off(fixture_zip_path, install_fake_tm
     fake = install_fake_tm1()
     assert load_module.run_load(load_args(fixture_zip_path, *extra)) == 0
     assert fake.connection_kwargs["ssl"] is expected_ssl
+
+
+def _clear_tm1_env(monkeypatch) -> None:
+    """Keep the config-source label deterministic against ambient env vars."""
+    for name in ("TM1_ADDRESS", "TM1_PORT", "TM1_USER", "TM1_PASSWORD", "TM1_SSL", "TM1_NAMESPACE"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_connection_summary_printed_before_connect(fixture_zip_path, install_fake_tm1, capsys, monkeypatch):
+    """The resolved target, ssl setting and config source print to stderr pre-connect."""
+    _clear_tm1_env(monkeypatch)
+    fake = install_fake_tm1()
+    assert load_module.run_load(load_args(fixture_zip_path, "--password", "s3cret-hunter2")) == 0
+    err = capsys.readouterr().err
+    assert err.startswith("target: srv:12354 ssl=on user=admin (config: cli)")
+    assert "s3cret-hunter2" not in err
+    assert fake.connection_kwargs is not None  # the connect followed the summary
+
+
+def test_ssl_connect_failure_hints_plain_http(fixture_zip_path, monkeypatch, capsys):
+    """A requests SSLError on connect gains the ssl=false hint, text kept visible."""
+
+    def failing_factory(**_kwargs):
+        raise requests.exceptions.SSLError("handshake failed: WRONG_VERSION_NUMBER")
+
+    monkeypatch.setattr("tm1_dump.load.TM1Service", failing_factory)
+    assert load_module.run_load(load_args(fixture_zip_path)) == 1
+    err = capsys.readouterr().err
+    assert "cannot connect to srv:12354" in err
+    assert "WRONG_VERSION_NUMBER" in err
+    assert "the server answered plain HTTP — set 'ssl = false' in config.ini or pass --no-ssl" in err
+
+
+def test_non_ssl_connect_failure_message_unchanged(fixture_zip_path, monkeypatch, capsys):
+    def failing_factory(**_kwargs):
+        raise RuntimeError("no server here")
+
+    monkeypatch.setattr("tm1_dump.load.TM1Service", failing_factory)
+    assert load_module.run_load(load_args(fixture_zip_path)) == 1
+    err = capsys.readouterr().err
+    assert "cannot connect to srv:12354: no server here" in err
+    assert "plain HTTP" not in err
