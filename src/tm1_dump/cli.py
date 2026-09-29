@@ -46,6 +46,26 @@ def build_parser() -> argparse.ArgumentParser:
     load_parser = subparsers.add_parser("load", help="reload a dump zip onto a TM1 server")
     load_parser.add_argument("zip_file", metavar="ZIP", help="dump zip to load")
     _add_connection_options(load_parser)
+    load_parser.add_argument(
+        "--include",
+        action="append",
+        metavar="TYPE=PATTERN",
+        help=(
+            "cherry-pick: load only objects matching PATTERN; repeatable; TYPE is one of the zip "
+            "sections or a bare PATTERN applies to every type; dependencies are auto-pulled from "
+            "the zip (a selected cube brings its dimensions and data); security loads only when "
+            "explicitly selected"
+        ),
+    )
+    load_parser.add_argument(
+        "--exclude",
+        action="append",
+        metavar="TYPE=PATTERN",
+        help=(
+            "skip matching objects; repeatable; exclude wins over include "
+            '(e.g. --exclude "data=*" loads structures without cube data)'
+        ),
+    )
     load_parser.add_argument("--workers", type=int, metavar="N", help="number of parallel workers")
     load_parser.add_argument(
         "--clean", action="store_true", help="delete matching objects on the target before loading"

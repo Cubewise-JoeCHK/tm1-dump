@@ -7,6 +7,15 @@ dimensions, cubes (+ rules), subsets, views, processes, chores, data,
 security — parallel within each type, sequential across types. Subsets
 come before views because a native view can reference named subsets.
 
+With ``--include``/``--exclude`` (issue #11) the load becomes a
+cherry-pick: the same filter syntax as ``dump`` selects objects per type,
+and every selection is completed from inside the zip — a selected cube
+pulls its dimensions and data, a selected view its cube, a selected
+subset its dimension, a selected chore its tasks' processes. Security is
+never auto-pulled; with filters active it loads only when explicitly
+selected. :func:`plan_selection` computes that effective selection before
+the server is contacted.
+
 Shared zip-side contract (with the dump engine, issue #2):
 
 - ``data/<cube>.csv`` starts with ``# cube,<name>`` and
@@ -32,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fnmatch
 import hashlib
 import io
 import json
@@ -48,6 +58,7 @@ from TM1py.Services import TM1Service
 
 from tm1_dump import zipio
 from tm1_dump.config import DEFAULT_SSL, ConnectionConfig, connection_problem, resolve_connection
+from tm1_dump.filters import ALL_TYPES, object_allowed, parse_filters
 from tm1_dump.manifest import Manifest, ManifestObject
 
 DEFAULT_WORKERS = 8
@@ -126,7 +137,10 @@ class _Entry:
 def run_load(args: argparse.Namespace) -> int:
     """Load the dump zip ``args.zip_file`` onto the target server.
 
-    Returns 0 when everything loaded, 1 when anything failed (validation,
+    With ``--include``/``--exclude`` only the matching objects load, plus
+    the dependencies auto-pulled from the zip; security loads only when
+    explicitly selected. Returns 0 when everything loaded, 1 when anything
+    failed (bad filters, an unmatched-everything selection, validation,
     connection, or any individual object — the rest still loads, and a
     failure summary is printed to stderr at the end).
     """
@@ -137,6 +151,12 @@ def run_load(args: argparse.Namespace) -> int:
         return 1
 
     with archive:
+        try:
+            filters = parse_filters(args.include, args.exclude)
+        except ValueError as exc:
+            print(f"tm1-dump: error: {exc}", file=sys.stderr)
+            return 1
+
         manifest = _read_manifest(archive, args.zip_file)
         if manifest is None:
             return 1
@@ -147,13 +167,29 @@ def run_load(args: argparse.Namespace) -> int:
                 print(f"  - {problem}", file=sys.stderr)
             return 1
 
+        entries_by_type = _group_entries(manifest)
+
+        # selection is pure zip-side work: it never touches the server
+        selection = plan_selection(args.include, args.exclude, entries_by_type, archive, filters)
+        for pattern in selection.unmatched:
+            print(f"tm1-dump: warning: filter {pattern!r} matched nothing in the zip", file=sys.stderr)
+        if (args.include or args.exclude) and not any(selection.entries_by_type.values()):
+            print(
+                f"tm1-dump: nothing to load: no objects in {args.zip_file!r} match the given "
+                "--include/--exclude filters",
+                file=sys.stderr,
+            )
+            return 1
+
         resolved = resolve_connection(args)
         problem = connection_problem(resolved)
         if problem:
             print(f"tm1-dump: {problem}", file=sys.stderr)
             return 1
 
-        entries_by_type = _group_entries(manifest)
+        if args.dry_run and (args.include or args.exclude):
+            _print_selection(selection)
+
         workers = args.workers or DEFAULT_WORKERS
         try:
             tm1 = _connect(resolved, workers)
@@ -166,9 +202,9 @@ def run_load(args: argparse.Namespace) -> int:
 
         with tm1:
             if args.dry_run:
-                _print_plan(tm1, archive, args.zip_file, entries_by_type)
+                _print_plan(tm1, archive, args.zip_file, selection.entries_by_type)
                 return 0
-            return _load_all(tm1, archive, entries_by_type, workers, clean=args.clean)
+            return _load_all(tm1, archive, selection.entries_by_type, workers, clean=args.clean)
 
 
 def _read_manifest(archive: zipfile.ZipFile, zip_path: str) -> Manifest | None:
@@ -227,6 +263,215 @@ def _group_entries(manifest: Manifest) -> dict[str, list[_Entry]]:
         parents = zipio.resolve_path(spec.file).parents
         grouped.setdefault(spec.type, []).append(_Entry(spec=spec, parents=parents))
     return grouped
+
+
+# --------------------------------------------------------------------------- selective load
+
+
+@dataclass
+class Selection:
+    """The effective cherry-pick for one zip under ``--include``/``--exclude``.
+
+    ``entries_by_type`` is what will load, grouped per type;
+    ``auto_notes`` maps a zip file to the selections that auto-pulled it
+    (``"cubes/Sales by Region"`` style) for the dry-run markers;
+    ``unmatched`` lists filter entries that matched no object name in the
+    zip (typo help).
+    """
+
+    entries_by_type: dict[str, list[_Entry]]
+    auto_notes: dict[str, list[str]]
+    unmatched: list[str]
+
+
+def plan_selection(
+    include: list[str] | None,
+    exclude: list[str] | None,
+    entries_by_type: dict[str, list[_Entry]],
+    archive: zipfile.ZipFile,
+    filters: dict[str, dict[str, list[str]]],
+) -> Selection:
+    """Compute the effective selection for ``--include``/``--exclude``.
+
+    ``--include`` switches the load into cherry-pick mode: every type is
+    opt-in, loading only the objects its own patterns name plus the
+    dependencies auto-pulled from inside the zip — a selected cube pulls
+    its dimensions and its data file, a selected view its cube (whose
+    dimensions and data follow), a selected subset its dimension, a
+    selected chore its tasks' processes. Security is never auto-pulled.
+    ``--exclude`` without ``--include`` keeps load-everything and merely
+    drops the excluded objects, like the dump filters. With no filters at
+    all everything is selected, exactly as an unfiltered load.
+    ``archive`` is only read, never changed.
+    """
+    if not (include or exclude):
+        return Selection(entries_by_type=entries_by_type, auto_notes={}, unmatched=[])
+
+    cherry_pick = bool(include)
+    direct = {
+        object_type: _direct_selection(entries_by_type.get(object_type, []), filters, object_type, cherry_pick)
+        for object_type in LOAD_ORDER
+    }
+
+    selected: dict[str, list[_Entry]] = {}
+    auto_notes: dict[str, list[str]] = {}
+    selected_files: set[str] = set()
+
+    def take(entry: _Entry, pulled_by: str | None = None) -> None:
+        """Add one entry to the selection; record which selection pulled it.
+
+        Auto-pulled entries must pass the filters themselves: exclude wins
+        everywhere (``--exclude "dimensions=Period"`` keeps a pulled cube's
+        Period out), and a type the user narrowed with ``--include`` keeps
+        that narrowing. A directly selected entry never gains an auto
+        marker; an auto-pulled entry accumulates every puller needing it.
+        """
+        if pulled_by is not None and not object_allowed(entry.name, filters, entry.object_type):
+            return
+        if entry.file in selected_files:
+            if pulled_by and entry.file in auto_notes:
+                auto_notes[entry.file].append(pulled_by)
+            return
+        selected_files.add(entry.file)
+        selected.setdefault(entry.object_type, []).append(entry)
+        if pulled_by:
+            auto_notes[entry.file] = [pulled_by]
+
+    for object_type in LOAD_ORDER:
+        for entry in direct[object_type]:
+            take(entry)
+
+    cube_by_name = {entry.name.lower(): entry for entry in entries_by_type.get(zipio.TYPE_CUBES, [])}
+    dimension_by_name = {entry.name.lower(): entry for entry in entries_by_type.get(zipio.TYPE_DIMENSIONS, [])}
+    process_by_name = {entry.name.lower(): entry for entry in entries_by_type.get(zipio.TYPE_PROCESSES, [])}
+    data_by_name = {entry.name.lower(): entry for entry in entries_by_type.get(zipio.TYPE_DATA, [])}
+
+    # selected views pull their cube
+    for entry in direct[zipio.TYPE_VIEWS]:
+        cube = cube_by_name.get(entry.parents[0].lower())
+        if cube:
+            take(cube, f"{zipio.TYPE_VIEWS}/{entry.name}")
+
+    # every selected cube (direct or pulled) carries its dimensions and its data;
+    # take() applies the filters, so --exclude "data=*" still drops the data
+    for cube_entry in selected.get(zipio.TYPE_CUBES, []):
+        for dimension_name in _cube_dimension_names(archive.read(cube_entry.file).decode("utf-8")):
+            dimension = dimension_by_name.get(dimension_name.lower())
+            if dimension:
+                take(dimension, f"{zipio.TYPE_CUBES}/{cube_entry.name}")
+        data = data_by_name.get(cube_entry.name.lower())
+        if data:
+            take(data, f"{zipio.TYPE_CUBES}/{cube_entry.name}")
+
+    # selected subsets pull their dimension
+    for entry in direct[zipio.TYPE_SUBSETS]:
+        dimension = dimension_by_name.get(entry.parents[0].lower())
+        if dimension:
+            take(dimension, f"{zipio.TYPE_SUBSETS}/{entry.name}")
+
+    # selected chores pull their tasks' processes
+    for entry in direct[zipio.TYPE_CHORES]:
+        for process_name in _chore_process_names(archive.read(entry.file).decode("utf-8")):
+            process = process_by_name.get(process_name.lower())
+            if process:
+                take(process, f"{zipio.TYPE_CHORES}/{entry.name}")
+
+    for entries in selected.values():
+        entries.sort(key=lambda entry: entry.file)
+
+    return Selection(
+        entries_by_type=selected,
+        auto_notes=auto_notes,
+        unmatched=_find_unmatched_patterns(include, exclude, entries_by_type),
+    )
+
+
+def _direct_selection(
+    entries: list[_Entry],
+    filters: dict[str, dict[str, list[str]]],
+    object_type: str,
+    cherry_pick: bool,
+) -> list[_Entry]:
+    """Direct filter selections of one type, before the auto-pull rules.
+
+    In cherry-pick mode (``--include`` given) a type nobody named starts
+    empty — the dump rule "no include patterns includes everything" would
+    turn ``--include "cubes=Sales*"`` into a full load, not a cherry-pick.
+    Exclude wins in both modes.
+    """
+    if cherry_pick:
+        include_patterns = filters["include"].get(object_type, []) + filters["include"].get(ALL_TYPES, [])
+        if not include_patterns:
+            return []
+    return [entry for entry in entries if object_allowed(entry.name, filters, object_type)]
+
+
+def _find_unmatched_patterns(
+    include: list[str] | None,
+    exclude: list[str] | None,
+    entries_by_type: dict[str, list[_Entry]],
+) -> list[str]:
+    """Return the filter entries that matched no object name in the zip.
+
+    A bare pattern is checked against every type; a ``TYPE=PATTERN`` entry
+    only against its type. Empty patterns are skipped.
+    """
+    names_by_type = {
+        object_type: [entry.name.lower() for entry in entries] for object_type, entries in entries_by_type.items()
+    }
+    unmatched: list[str] = []
+    for raw_entry in list(include or []) + list(exclude or []):
+        if "=" in raw_entry:
+            object_type, _, pattern = raw_entry.partition("=")
+            types_to_scan = [object_type.strip().lower()]
+        else:
+            types_to_scan = list(zipio.OBJECT_TYPES)
+            pattern = raw_entry
+        lowered = pattern.strip().lower()
+        if not lowered:
+            continue
+        matched = any(
+            any(fnmatch.fnmatch(name, lowered) for name in names_by_type.get(scan_type, []))
+            for scan_type in types_to_scan
+        )
+        if not matched:
+            unmatched.append(raw_entry)
+    return unmatched
+
+
+def _cube_dimension_names(text: str) -> list[str]:
+    """Dimension names referenced by a cube body (either JSON shape)."""
+    body = json.loads(text)
+    if "Dimensions@odata.bind" in body:
+        return [_bind_name(bind) for bind in body["Dimensions@odata.bind"]]
+    return [dimension["Name"] for dimension in body.get("Dimensions", [])]
+
+
+def _chore_process_names(text: str) -> list[str]:
+    """Process names referenced by a chore body's tasks (either JSON shape)."""
+    body = json.loads(text)
+    names: list[str] = []
+    for task in body.get("Tasks", []):
+        if "Process@odata.bind" in task:
+            names.append(_bind_name(task["Process@odata.bind"]))
+        elif isinstance(task.get("Process"), dict) and task["Process"].get("Name"):
+            names.append(task["Process"]["Name"])
+    return names
+
+
+def _print_selection(selection: Selection) -> None:
+    """Print the effective selection per type before anything touches a server."""
+    print("selection from --include/--exclude (dependencies auto-pulled from the zip):")
+    for object_type in LOAD_ORDER:
+        entries = selection.entries_by_type.get(object_type, [])
+        if not entries:
+            continue
+        described = []
+        for entry in entries:
+            reasons = selection.auto_notes.get(entry.file)
+            marker = f" (auto: needed by {', '.join(reasons)})" if reasons else " (selected)"
+            described.append(entry.name + marker)
+        print(f"  {object_type}: {', '.join(described)}")
 
 
 def _load_all(
@@ -356,11 +601,7 @@ def _parse_cube(text: str) -> Cube:
     the expanded REST entity (``Dimensions: [{"Name": ...}]``).
     """
     body = json.loads(text)
-    if "Dimensions@odata.bind" in body:
-        dimensions = [_bind_name(bind) for bind in body["Dimensions@odata.bind"]]
-    else:
-        dimensions = [dimension["Name"] for dimension in body.get("Dimensions", [])]
-    return Cube(name=body["Name"], dimensions=dimensions, rules=body.get("Rules") or None)
+    return Cube(name=body["Name"], dimensions=_cube_dimension_names(text), rules=body.get("Rules") or None)
 
 
 def _parse_subset(text: str) -> Subset:
