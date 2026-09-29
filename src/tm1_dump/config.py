@@ -14,6 +14,8 @@ import configparser
 import os
 from dataclasses import dataclass, fields
 
+import requests
+
 CONFIG_SECTION = "tm1"
 
 #: Written by ``tm1-dump init`` and auto-discovered from the current directory.
@@ -164,6 +166,81 @@ def connection_problem(resolved: ConnectionConfig) -> str | None:
             "set env vars, or use --config-file"
         )
     return None
+
+
+#: Appended to the connection error when the failure is an SSL mismatch:
+#: talking TLS to a server answering plain HTTP fails with e.g.
+#: ``SSL: WRONG_VERSION_NUMBER`` and almost always means the target expects
+#: ``ssl = false``.
+SSL_HINT = "the server answered plain HTTP — set 'ssl = false' in config.ini or pass --no-ssl"
+
+
+def describe_connection(resolved: ConnectionConfig, args: argparse.Namespace) -> str:
+    """One-line diagnostic of the connection about to be opened; never the password.
+
+    Format: ``target: <address>:<port> ssl=on|off user=<user> (config: <source>)``.
+    ``ssl`` shows the effective setting (unset means the TM1 default, on);
+    source is the config file path in play, else ``env``, ``cli`` or ``defaults``.
+    """
+    ssl_effective = resolved.ssl if resolved.ssl is not None else DEFAULT_SSL
+    return (
+        f"target: {resolved.address}:{resolved.port} ssl={'on' if ssl_effective else 'off'} "
+        f"user={resolved.user} (config: {_config_source(args)})"
+    )
+
+
+def _config_source(args: argparse.Namespace) -> str:
+    """Name where the connection configuration came from.
+
+    The file path wins whenever a config file is in play — that is the case
+    users need to see (an edited-in-the-wrong-directory ``config.ini``).
+    Without a file, ``env`` when any environment variable provided a value,
+    ``cli`` when any command-line option did, ``defaults`` when nothing
+    anywhere did.
+    """
+    config_file = args.config_file or _discover_config_file()
+    if config_file:
+        return config_file
+    if _layer_has_value(_layer_from_env(os.environ)):
+        return "env"
+    if _layer_has_value(_layer_from_cli(args)):
+        return "cli"
+    return "defaults"
+
+
+def _layer_has_value(layer: ConnectionConfig) -> bool:
+    """Whether the layer provides at least one connection setting."""
+    return any(getattr(layer, setting.name) is not None for setting in fields(ConnectionConfig))
+
+
+def connection_error_text(exc: BaseException) -> str:
+    """Human-readable text for a failed connect; SSL mismatches gain a hint.
+
+    The original error text always stays visible; the plain-HTTP hint is
+    appended when the failure is — or chains to — a ``requests`` ``SSLError``.
+    All other failures pass through untouched.
+    """
+    text = str(exc) or exc.__class__.__name__
+    if _is_ssl_error(exc):
+        return f"{text} — {SSL_HINT}"
+    return text
+
+
+def _is_ssl_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is, or was raised while handling, a requests SSLError.
+
+    TM1py 2.x re-raises ``requests`` connection errors as-is, but through
+    retry handlers that can interleave wrapper exceptions — walk the
+    ``__cause__``/``__context__`` chain so the hint survives wrapping.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, requests.exceptions.SSLError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _env_int(environ: dict[str, str], name: str) -> int | None:

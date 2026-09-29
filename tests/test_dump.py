@@ -8,6 +8,7 @@ import json
 import zipfile
 
 import pytest
+import requests
 
 from tm1_dump import dump as dump_module
 from tm1_dump import zipio
@@ -336,6 +337,40 @@ def test_connect_receives_resolved_ssl_from_env(fake_tm1, tmp_path, monkeypatch)
     monkeypatch.setenv("TM1_SSL", "false")
     assert dump_module.run_dump(_dump_args(str(tmp_path / "d.zip"))) == 0
     assert fake_tm1.captured["conn"].ssl is False
+
+
+def test_connection_summary_printed_before_connect(fake_tm1, tmp_path, capsys):
+    """The resolved target, ssl setting and config source print to stderr pre-connect."""
+    assert dump_module.run_dump(_dump_args(str(tmp_path / "d.zip"), password="s3cret-hunter2")) == 0
+    err = capsys.readouterr().err
+    assert err.startswith("target: localhost:12354 ssl=on user=admin (config: cli)")
+    assert "s3cret-hunter2" not in err
+    assert "==> dimensions:" in err  # the summary precedes the progress output
+
+
+def test_ssl_connect_failure_hints_plain_http(tmp_path, monkeypatch, capsys):
+    """A requests SSLError on connect gains the ssl=false hint, text kept visible."""
+
+    def failing_connect(_conn):
+        raise requests.exceptions.SSLError("handshake failed: WRONG_VERSION_NUMBER")
+
+    monkeypatch.setattr(dump_module, "_connect", failing_connect)
+    assert dump_module.run_dump(_dump_args(str(tmp_path / "d.zip"))) == 2
+    err = capsys.readouterr().err
+    assert "cannot connect to TM1" in err
+    assert "WRONG_VERSION_NUMBER" in err
+    assert "the server answered plain HTTP — set 'ssl = false' in config.ini or pass --no-ssl" in err
+
+
+def test_non_ssl_connect_failure_message_unchanged(tmp_path, monkeypatch, capsys):
+    def failing_connect(_conn):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(dump_module, "_connect", failing_connect)
+    assert dump_module.run_dump(_dump_args(str(tmp_path / "d.zip"))) == 2
+    err = capsys.readouterr().err
+    assert "cannot connect to TM1: connection refused" in err
+    assert "plain HTTP" not in err
 
 
 # --------------------------------------------------------------------------- full dump
