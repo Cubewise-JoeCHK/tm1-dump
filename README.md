@@ -22,21 +22,39 @@ uv run tm1-dump --help
 Copy a whole PROD server onto a DEV box:
 
 ```bash
-# 1. dump the source (writes prod.zip)
-tm1-dump dump --address prod.tm1.internal --port 12354 --user admin --password 'secret' --out prod.zip
+# 1. one-time: write a config.ini in this directory, then edit it
+#    (address, port, user, password — the PROD server)
+tm1-dump init
 
-# 2. look before you leap — what would be created/overwritten on the target?
-tm1-dump load prod.zip --address dev.tm1.internal --port 12354 --user admin --password 'secret' --no-ssl --dry-run
+# 2. dump the source (writes prod.zip); connection comes from ./config.ini
+tm1-dump dump --out prod.zip
 
-# 3. reload
-tm1-dump load prod.zip --address dev.tm1.internal --port 12354 --user admin --password 'secret' --no-ssl
+# 3. point a second directory at the target: init, edit, look, load
+mkdir dev && cd dev
+tm1-dump init
+tm1-dump load ../prod.zip --dry-run    # what would be created/overwritten?
+tm1-dump load ../prod.zip
 ```
 
-Connection settings can also come from environment variables (`TM1_ADDRESS`, `TM1_PORT`,
-`TM1_USER`, `TM1_PASSWORD`, `TM1_SSL`, `TM1_NAMESPACE`) or a TM1py-style ini file
-(`--config-file`). Precedence: CLI flags > environment > config file.
+`dump` and `load` automatically read `config.ini` from the current directory; CLI flags and
+`TM1_*` environment variables (`TM1_ADDRESS`, `TM1_PORT`, `TM1_USER`, `TM1_PASSWORD`, `TM1_SSL`,
+`TM1_NAMESPACE`) override it. Precedence: CLI flags > environment > config file (explicit
+`--config-file` or the implicit `./config.ini`). The password sits in plaintext in `config.ini`
+— keep the file private.
 
 ## Commands
+
+### `tm1-dump init`
+
+Writes a starter `config.ini` (TM1py-style, `[tm1]` section) into the current directory and
+prints the next step. Every later `dump`/`load` run in that directory picks it up automatically.
+The password is stored in plaintext — keep the file private.
+
+Exit codes: `0` written · `1` `config.ini` already exists (add `--force` to overwrite).
+
+| Option | Meaning |
+| --- | --- |
+| `--force` | overwrite an existing `config.ini` |
 
 ### `tm1-dump dump`
 
@@ -87,7 +105,7 @@ individual object).
 | `--password` | `TM1_PASSWORD` | TM1 password |
 | `--ssl` / `--no-ssl` | `TM1_SSL=true/false` | HTTPS (default on, like TM1) or HTTP |
 | `--namespace` | `TM1_NAMESPACE` | CAM namespace for SAML/Cognos security mode |
-| `--config-file` | — | TM1py-style ini file with a `[tm1]` section |
+| `--config-file` | — | TM1py-style ini file with a `[tm1]` section; without it, `./config.ini` in the current directory is used when present (write one with `tm1-dump init`) |
 
 ## What is inside the zip
 
@@ -145,7 +163,7 @@ stay a single segment (`weird/name` → `weird%2Fname`).
 
 ```bash
 uv sync
-uv run pytest          # 140 tests, incl. a mocked dump→load roundtrip
+uv run pytest          # 149 tests, incl. a mocked dump→load roundtrip
 uv run ruff check .    # lint
 uv build               # sdist + wheel
 ```

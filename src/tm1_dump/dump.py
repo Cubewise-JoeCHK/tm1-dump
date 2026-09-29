@@ -36,7 +36,7 @@ import TM1py
 from TM1py import TM1Service
 
 from tm1_dump import zipio
-from tm1_dump.config import DEFAULT_SSL, ConnectionConfig, resolve_connection
+from tm1_dump.config import DEFAULT_SSL, ConnectionConfig, connection_problem, resolve_connection
 from tm1_dump.manifest import Manifest, ManifestObject, SourceInfo
 
 DEFAULT_WORKERS = 8
@@ -454,6 +454,10 @@ def run_dump(args: argparse.Namespace) -> int:
         return 2
 
     conn = resolve_connection(args)
+    problem = connection_problem(conn)
+    if problem:
+        print(f"tm1-dump: {problem}", file=sys.stderr)
+        return 2
     try:
         tm1 = _connect(conn)
     except Exception as error:

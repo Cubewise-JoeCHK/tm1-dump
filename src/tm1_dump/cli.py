@@ -6,16 +6,21 @@ import argparse
 from collections.abc import Sequence
 
 from tm1_dump.dump import run_dump
+from tm1_dump.initcmd import run_init
 from tm1_dump.load import run_load
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the ``tm1-dump`` parser with its ``dump`` and ``load`` subcommands."""
+    """Build the ``tm1-dump`` parser with its ``init``, ``dump`` and ``load`` subcommands."""
     parser = argparse.ArgumentParser(
         prog="tm1-dump",
         description="Dump one TM1 instance to one zip — and reload it onto another server.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = subparsers.add_parser("init", help="write a starter config.ini in the current directory")
+    init_parser.add_argument("--force", action="store_true", help="overwrite an existing config.ini")
+    init_parser.set_defaults(func=run_init)
 
     dump_parser = subparsers.add_parser("dump", help="dump one TM1 instance into a zip archive")
     _add_connection_options(dump_parser)
@@ -62,10 +67,10 @@ def _add_connection_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ssl", dest="ssl", action="store_true", default=None, help="use HTTPS")
     parser.add_argument("--no-ssl", dest="ssl", action="store_false", help="use HTTP")
     parser.add_argument("--namespace", help="CAM namespace (SAML/Cognos security mode)")
-    parser.add_argument("--config-file", help="TM1py-style ini file with a [tm1] section")
+    parser.add_argument("--config-file", help="TM1py-style ini file with a [tm1] section (default: ./config.ini)")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse arguments and dispatch to the selected engine."""
+    """Parse arguments and dispatch to the selected subcommand."""
     args = build_parser().parse_args(argv)
     return args.func(args)
