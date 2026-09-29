@@ -1,0 +1,41 @@
+# Manual exe builder: builds a standalone Windows binary of the CLI with
+# PyInstaller on a windows runner and attaches it to an existing release.
+# Dispatch with: gh workflow run build-exe --ref main -f tag vX.Y.Z
+# (public repo => Actions minutes are free; keep it workflow_dispatch-only).
+name: build-exe
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and attach to"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package + PyInstaller
+        run: pip install . pyinstaller
+      - name: Write launcher
+        shell: python
+        run: |
+          import pathlib
+          pathlib.Path("launcher.py").write_text(
+              "import sys\nfrom tm1_dump.cli import main\nsys.exit(main())\n"
+          )
+      - name: Build onefile exe
+        run: pyinstaller --onefile --name tm1-dump --distpath dist launcher.py
+      - name: Attach exe to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" dist/tm1-dump.exe --clobber --repo "${{ github.repository }}"
