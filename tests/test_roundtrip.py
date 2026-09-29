@@ -233,6 +233,61 @@ def build_source_model() -> ModelTM1:
     return tm1
 
 
+def build_no_data_model() -> ModelTM1:
+    """A small model for the ``--no-data`` roundtrip (issue #9).
+
+    One regular cube with data, the ``}ElementAttributes_Month`` control
+    cube carrying the dimension's attribute values (as a real server
+    maintains it: dimensions ``[Month, }ElementAttributes_Month]``), and
+    security. ``--no-data`` must keep the control cube's values while
+    dropping the regular cube's data.
+    """
+    tm1 = ModelTM1(server_name="NoDataSource")
+
+    tm1.dimensions.update_or_create(
+        Dimension(
+            name="Month",
+            hierarchies=[
+                Hierarchy(
+                    name="Month",
+                    dimension_name="Month",
+                    elements=[Element("Jan", "Numeric"), Element("Feb", "Numeric")],
+                    element_attributes=[ElementAttribute("Comment", "String")],
+                )
+            ],
+        )
+    )
+    tm1.dimensions.update_or_create(
+        Dimension(
+            name="}ElementAttributes_Month",
+            hierarchies=[
+                Hierarchy(
+                    name="}ElementAttributes_Month",
+                    dimension_name="}ElementAttributes_Month",
+                    elements=[Element("Comment", "String")],
+                )
+            ],
+        )
+    )
+
+    tm1.cubes.update_or_create(Cube(name="Sales", dimensions=["Month"]))
+    tm1.cubes.update_or_create(
+        Cube(name="}ElementAttributes_Month", dimensions=["Month", "}ElementAttributes_Month"])
+    )
+
+    tm1.security.create_group("ADMIN")
+    tm1.security.create_user(User(name="admin", groups=["ADMIN"], friendly_name="Administrator"))
+    tm1.cubes.cells.write_values("}CubeSecurity", {("Sales", "ADMIN"): "Admin"})
+
+    tm1.cubes.cells.write_values("Sales", {("Jan",): 100, ("Feb",): 42}, ["Month"])
+    tm1.cubes.cells.write_values(
+        "}ElementAttributes_Month",
+        {("Jan", "Comment"): "Season start", ("Feb", "Comment"): "Short month"},
+        ["Month", "}ElementAttributes_Month"],
+    )
+    return tm1
+
+
 def build_stale_target(target: ModelTM1) -> None:
     """Pre-populate a target with stale state that ``--clean`` must replace."""
     target.dimensions.update_or_create(
@@ -275,20 +330,23 @@ def roundtrip_env(monkeypatch):
     return source, target
 
 
-def _dump_args(out: str) -> argparse.Namespace:
-    return argparse.Namespace(
-        address="source.internal",
-        port=12354,
-        user="admin",
-        password="apple",
-        ssl=None,
-        namespace=None,
-        config_file=None,
-        include=None,
-        exclude=None,
-        workers=None,
-        out=out,
-    )
+def _dump_args(out: str, **overrides) -> argparse.Namespace:
+    defaults = {
+        "address": "source.internal",
+        "port": 12354,
+        "user": "admin",
+        "password": "apple",
+        "ssl": None,
+        "namespace": None,
+        "config_file": None,
+        "include": None,
+        "exclude": None,
+        "workers": None,
+        "out": out,
+        "no_data": False,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
 
 
 def _dump_and_load(tmp_path, load_extra=()) -> tuple[str, int, int]:
@@ -515,3 +573,30 @@ def test_roundtrip_reload_is_idempotent(roundtrip_env, tmp_path, capsys):
     assert {"dimensions", "cubes", "processes", "chores"} <= second_pass_kinds
     assert "load complete: no failures" in capsys.readouterr().out
     assert_models_equivalent(source, target)
+
+
+def test_roundtrip_no_data_keeps_attribute_values(monkeypatch, tmp_path, capsys):
+    """dump --no-data -> load onto a fresh target: attribute values return,
+    regular cube data stays behind, security rides along untouched."""
+    for name in ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    _source, target = install_model_tm1(monkeypatch, source=build_no_data_model())
+
+    zip_path = str(tmp_path / "no_data.zip")
+    assert dump_module.run_dump(_dump_args(zip_path, no_data=True)) == 0
+
+    with zipfile.ZipFile(zip_path) as archive:
+        names = archive.namelist()
+    assert zipio.build_path(zipio.TYPE_DATA, "Sales") not in names
+    assert zipio.build_path(zipio.TYPE_DATA, "}ElementAttributes_Month") in names
+    assert zipio.build_path(zipio.TYPE_SECURITY, "permissions") in names
+
+    assert load_module.run_load(load_args(zip_path)) == 0
+    assert "load complete: no failures" in capsys.readouterr().out
+    assert target.read_cells("Sales") == {}  # no regular cube data crossed over
+    assert target.read_cells("}ElementAttributes_Month") == {
+        ("Jan", "Comment"): "Season start",
+        ("Feb", "Comment"): "Short month",
+    }
+    # permissions ride in security/permissions.json, not the data phase
+    assert target.read_cells("}CubeSecurity") == {("Sales", "ADMIN"): "Admin"}
