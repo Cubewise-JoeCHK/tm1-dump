@@ -31,6 +31,8 @@ LOAD_OPTIONS = (
     "--no-ssl",
     "--namespace",
     "--config-file",
+    "--include",
+    "--exclude",
     "--workers",
     "--clean",
     "--dry-run",
@@ -80,6 +82,16 @@ def test_load_takes_positional_zip():
     assert args.zip_file == "some dump.zip"
     assert args.clean is False
     assert args.dry_run is False
+    assert args.include is None
+    assert args.exclude is None
+
+
+def test_load_filters_append_repeatable():
+    args = build_parser().parse_args(
+        ["load", "dump.zip", "--include", "cubes=Sales*", "--include", "processes=Sales*", "--exclude", "data=*"]
+    )
+    assert args.include == ["cubes=Sales*", "processes=Sales*"]
+    assert args.exclude == ["data=*"]
 
 
 def test_no_data_defaults_off_and_flag_turns_it_on():

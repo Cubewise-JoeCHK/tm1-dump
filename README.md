@@ -82,7 +82,9 @@ bad filters or connection failure.
 | Option | Meaning |
 | --- | --- |
 | `ZIP` | the dump zip to reload (integrity-checked against `manifest.json` before connecting) |
-| `--dry-run` | print the create/overwrite/skip plan per type and touch nothing |
+| `--include TYPE=PATTERN` | cherry-pick: load only matching objects; repeatable; `TYPE` is one of the [zip sections](#what-is-inside-the-zip) or a bare `PATTERN` applies to every type; dependencies are auto-pulled from the zip (see below); **security loads only when explicitly selected** |
+| `--exclude TYPE=PATTERN` | skip matching objects; repeatable; exclude wins over include; `--exclude` alone keeps load-everything and just drops the excluded objects |
+| `--dry-run` | print the effective selection (with auto-pull markers) and the create/overwrite/skip plan per type, then touch nothing |
 | `--clean` | delete matching objects on the target before loading (chores → processes → cubes → dimensions; views/subsets/data go with their parents; **security is never deleted**) |
 | `--workers N` | parallel load threads (default 8) |
 | `--address`, `--port`, `--user`, `--password`, `--ssl` / `--no-ssl`, `--namespace`, `--config-file` | connection options (shared table below) |
@@ -92,8 +94,50 @@ in dependency order — dimensions → cubes (+rules) → subsets → views → 
 data → security — parallel within a type, sequential across types. One failing object is
 skipped and summarized at the end; everything else still loads.
 
-Exit codes: `0` everything loaded · `1` anything failed (validation, connection, or any
-individual object).
+#### Cherry-pick a module (`--include` / `--exclude`)
+
+`load` uses the same filter syntax as `dump` — case-insensitive fnmatch per type
+(`--include "cubes=Sales*"`), a bare `PATTERN` matches object names in every type, exclude wins.
+Without any filter everything loads, exactly as before. A pattern that matches nothing in the
+zip prints a warning (typo help); a selection of zero objects exits 1 without contacting the
+server.
+
+`--include` switches the load into cherry-pick mode: every type is opt-in, and missing
+prerequisites are **auto-pulled from the zip** so a partial load does not die on them:
+
+- a selected cube brings its dimensions and its `data/<cube>.csv`
+- a selected view brings its cube (whose dimensions and data follow)
+- a selected subset brings its dimension
+- a selected chore brings its tasks' processes
+- security is never auto-pulled — it loads only when explicitly selected (`security=...`)
+- `data=` filters narrow further: `--exclude "data=*"` keeps the structures but drops every
+  data file
+
+One module (cube + processes), with everything they need pulled in automatically:
+
+```bash
+tm1-dump load prod.zip --dry-run --include "cubes=Sales*" --include "processes=Sales*"
+tm1-dump load prod.zip --include "cubes=Sales*" --include "processes=Sales*"
+```
+
+Structures without cube data:
+
+```bash
+tm1-dump load prod.zip --include "cubes=*" --exclude "data=*"
+```
+
+`--dry-run` prints the effective selection before touching the server, marking auto-pulled
+entries with what needed them, so nothing rides along silently:
+
+```
+selection from --include/--exclude (dependencies auto-pulled from the zip):
+  cubes: Sales by Region (selected)
+  dimensions: Month (auto: needed by cubes/Sales by Region), Region (auto: needed by cubes/Sales by Region)
+  data: Sales by Region (auto: needed by cubes/Sales by Region)
+```
+
+Exit codes: `0` everything loaded · `1` anything failed (validation, connection, any
+individual object, or a selection that matched nothing).
 
 ### Connection options (both commands)
 
@@ -163,7 +207,7 @@ stay a single segment (`weird/name` → `weird%2Fname`).
 
 ```bash
 uv sync
-uv run pytest          # 149 tests, incl. a mocked dump→load roundtrip
+uv run pytest          # 175 tests, incl. a mocked dump→load roundtrip
 uv run ruff check .    # lint
 uv build               # sdist + wheel
 ```

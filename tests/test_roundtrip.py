@@ -575,6 +575,74 @@ def test_roundtrip_reload_is_idempotent(roundtrip_env, tmp_path, capsys):
     assert_models_equivalent(source, target)
 
 
+# --------------------------------------------------------------------------- selective load (issue #11)
+
+
+def test_roundtrip_cherry_pick_loads_module_with_dependencies(roundtrip_env, tmp_path, capsys):
+    """--include one module: only its cube, its process and the auto-pulled
+    dependencies (dimensions, data) exist on the fresh target."""
+    source, target = roundtrip_env
+    zip_path = str(tmp_path / "roundtrip.zip")
+    assert dump_module.run_dump(_dump_args(zip_path)) == 0
+
+    extra = ("--include", "cubes=Sales*", "--include", "processes=Export*")
+    assert load_module.run_load(load_args(zip_path, *extra)) == 0
+    assert "load complete: no failures" in capsys.readouterr().out
+
+    # the module: one cube + one process
+    assert {cube.name for cube in target.cubes.get_all()} == {"Sales by Region"}
+    assert {process.name for process in target.processes.get_all()} == {"Export Actuals"}
+    # auto-pulled dependencies: the cube's dimensions and its data, nothing else
+    assert set(target.dimensions.get_all_names()) == {"Region", "Month"}
+    assert target.read_cells("Sales by Region") == source.read_cells("Sales by Region")
+    # nothing else rode along
+    assert target.chores.get_all() == []
+    assert all(target.views.get_all(cube.name)[1] == [] for cube in target.cubes.get_all())
+    assert all(target.subsets.get_all_names(name, name) == [] for name in ("Region", "Month"))
+    assert target.read_cells("P&L") == {}  # the P&L module was not selected
+    # security never auto-pulled
+    assert target.security.get_all_groups() == []
+    assert target.security.get_all_users() == []
+    assert target.read_cells("}CubeSecurity") == {}
+
+
+def test_roundtrip_structure_only_load_excludes_data(roundtrip_env, tmp_path, capsys):
+    """--include "cubes=*" --exclude "data=*": every cube and its dimensions,
+    no cube data anywhere, security out (never auto-pulled)."""
+    source, target = roundtrip_env
+    zip_path = str(tmp_path / "roundtrip.zip")
+    assert dump_module.run_dump(_dump_args(zip_path)) == 0
+
+    extra = ("--include", "cubes=*", "--exclude", "data=*")
+    assert load_module.run_load(load_args(zip_path, *extra)) == 0
+    assert "load complete: no failures" in capsys.readouterr().out
+
+    assert {cube.name for cube in target.cubes.get_all()} == {cube.name for cube in source.cubes.get_all()}
+    assert set(target.dimensions.get_all_names()) == {"Account", "Month", "Region"}
+    for cube in target.cubes.get_all():
+        assert target.read_cells(cube.name) == {}
+    assert target.security.get_all_groups() == []
+
+
+def test_roundtrip_dry_run_lists_selection_and_multi_pullers(roundtrip_env, tmp_path, capsys):
+    """--dry-run lists the effective selection first; an object pulled by
+    several selections names every puller."""
+    _source, target = roundtrip_env
+    zip_path = str(tmp_path / "roundtrip.zip")
+    assert dump_module.run_dump(_dump_args(zip_path)) == 0
+
+    assert load_module.run_load(load_args(zip_path, "--include", "views=*", "--dry-run")) == 0
+
+    assert target.mutating_calls == []
+    output = capsys.readouterr().out
+    assert "selection from --include/--exclude (dependencies auto-pulled from the zip):" in output
+    assert "views: Simple (selected), Top Revenue (selected)" in output
+    assert "cubes: P&L (auto: needed by views/Simple, views/Top Revenue)" in output
+    assert "dimensions: Account (auto: needed by cubes/P&L), Month (auto: needed by cubes/P&L)" in output
+    assert "data: P&L (auto: needed by cubes/P&L)" in output
+    assert "security:" not in output
+
+
 def test_roundtrip_no_data_keeps_attribute_values(monkeypatch, tmp_path, capsys):
     """dump --no-data -> load onto a fresh target: attribute values return,
     regular cube data stays behind, security rides along untouched."""

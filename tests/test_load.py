@@ -203,6 +203,86 @@ def test_dry_run_reports_create_and_overwrite(fixture_zip_path, install_fake_tm1
     assert "data: 1 cube data file(s) to stream [P&L]" in output
 
 
+# --- selective load (issue #11) -----------------------------------------------
+
+
+def test_filtered_load_narrows_every_phase(fixture_zip_path, install_fake_tm1, capsys):
+    """--include cubes=P&* loads the cube, its pulled dimensions and data — nothing else."""
+    fake = install_fake_tm1()
+    assert load_module.run_load(load_args(fixture_zip_path, "--include", "cubes=P&*")) == 0
+    assert "load complete: no failures" in capsys.readouterr().out
+    upserts = _calls_of(fake, "upsert")
+    assert {(call[1], call[2]) for call in upserts} == {
+        ("dimensions", "Account"),
+        ("dimensions", "Period"),
+        ("cubes", "P&L"),
+    }
+    assert [cube_name for cube_name, _, _ in fake.cell_writes] == ["P&L"]
+    # security never auto-pulled: no groups, users or memberships touched
+    assert _calls_of(fake, "create_group") == []
+    assert _calls_of(fake, "create_user") == []
+    assert _calls_of(fake, "add_user_to_groups") == []
+    assert _calls_of(fake, "write_value") == []
+
+
+def test_exclude_only_keeps_load_everything_minus_excluded(fixture_zip_path, install_fake_tm1):
+    """--exclude without --include keeps the load-everything default for the rest."""
+    fake = install_fake_tm1()
+    assert load_module.run_load(load_args(fixture_zip_path, "--exclude", "chores=*")) == 0
+    upserts = _calls_of(fake, "upsert")
+    assert {call[1] for call in upserts} == {"dimensions", "cubes", "views", "subsets", "processes"}
+    assert [call[2] for call in _calls_of(fake, "create_group")] == ["Planning", "Finance"]
+
+
+def test_unmatched_pattern_warns_but_still_loads(fixture_zip_path, install_fake_tm1, capsys):
+    """A pattern matching nothing prints a naming warning; the rest still loads."""
+    fake = install_fake_tm1()
+    extra = ["--include", "cubes=P&*", "--include", "processes=Nope*"]
+    assert load_module.run_load(load_args(fixture_zip_path, *extra)) == 0
+    stderr = capsys.readouterr().err
+    assert "warning: filter 'processes=Nope*' matched nothing in the zip" in stderr
+    assert {call[1] for call in _calls_of(fake, "upsert")} == {"dimensions", "cubes"}
+
+
+def test_nothing_selected_exits_1_message(fixture_zip_path, install_fake_tm1, capsys):
+    """Zero selected objects exits 1 with a clear message and no connection."""
+    fake = install_fake_tm1()
+    assert load_module.run_load(load_args(fixture_zip_path, "--include", "cubes=Nope*")) == 1
+    stderr = capsys.readouterr().err
+    assert "nothing to load" in stderr
+    assert "cubes=Nope*" in stderr
+    assert fake.connection_kwargs is None
+
+
+def test_dry_run_lists_effective_selection_with_auto_markers(fixture_zip_path, install_fake_tm1, capsys):
+    """--dry-run prints the selection per type, marking what auto-pull added."""
+    fake = install_fake_tm1()
+    assert load_module.run_load(load_args(fixture_zip_path, "--include", "cubes=P&*", "--dry-run")) == 0
+    output = capsys.readouterr().out
+    assert "selection from --include/--exclude (dependencies auto-pulled from the zip):" in output
+    assert "cubes: P&L (selected)" in output
+    assert "dimensions: Account (auto: needed by cubes/P&L), Period (auto: needed by cubes/P&L)" in output
+    assert "data: P&L (auto: needed by cubes/P&L)" in output
+    assert "security:" not in output
+    # the regular create/overwrite plan still follows, narrowed to the selection
+    assert "dimensions: 2 (2 create, 0 overwrite)" in output
+    assert fake.mutating_calls == []
+
+
+def test_dry_run_selection_prints_before_connecting(fixture_zip_path, monkeypatch, capsys):
+    """The selection listing is pure zip-side work: it prints even when the
+    connection afterwards fails — no server contact needed to show it."""
+    def exploding_factory(**_kwargs):
+        raise RuntimeError("no server here")
+
+    monkeypatch.setattr("tm1_dump.load.TM1Service", exploding_factory)
+    args = load_args(fixture_zip_path, "--include", "cubes=P&*", "--dry-run")
+    assert load_module.run_load(args) == 1
+    captured = capsys.readouterr()
+    assert "cubes: P&L (selected)" in captured.out
+    assert "cannot connect" in captured.err
+
+
 # --- integrity & validation ---------------------------------------------------
 
 
