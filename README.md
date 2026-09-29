@@ -150,3 +150,13 @@ dimensions with element attributes, cubes with/without rules, views/subsets, pro
 parameters, a two-task chore, security, cube data) is dumped with the real dump engine and
 reloaded with the real load engine against an in-memory TM1 double, then compared object class
 by object class.
+
+### Versioning
+
+The package version is derived from git tags (`vX.Y.Z`) via [setuptools-scm](https://setuptools-scm.readthedocs.io/)
+— there is no static version in `pyproject.toml`. Builds from tarballs (no `.git`, e.g. release
+automation) must set the version explicitly:
+
+```bash
+SETUPTOOLS_SCM_PRETEND_VERSION=0.2.3 uv build
+```
