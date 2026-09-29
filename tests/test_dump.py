@@ -162,10 +162,12 @@ class FakeTM1:
         cubes = [
             FakeCube("Sales", ["Month", "Account"]),
             FakeCube("Empty", ["Month"]),
+            FakeCube("}ElementAttributes_Month", ["Month", "}ElementAttributes_Month"]),
         ]
         dimension_names = {
             "Sales": ["Month", "Account"],
             "Empty": ["Month"],
+            "}ElementAttributes_Month": ["Month", "}ElementAttributes_Month"],
             "}CubeSecurity": ["}Cubes", "}Groups"],
             "}DimensionSecurity": ["}Dimensions", "}Groups"],
             "}ProcessSecurity": ["}Processes", "}Groups"],
@@ -196,6 +198,7 @@ class FakeTM1:
         self.cells = FakeCellService(
             data={
                 "Sales": ["Jan,Revenue,100", "Feb,Revenue,200", "Jan,Expense,50"],
+                "}ElementAttributes_Month": ["Jan,Comment,Season start", "Feb,Comment,Short month"],
                 "}CubeSecurity": ["Sales,ADMIN,Admin", "Sales,Data,Write", "Plan,Data,Read"],
                 "}ChoreSecurity": ["ADMIN,Nightly Load,Admin"],
             }
@@ -257,6 +260,7 @@ def _dump_args(out: str, **overrides) -> argparse.Namespace:
         "exclude": None,
         "workers": None,
         "out": out,
+        "no_data": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -348,6 +352,7 @@ def test_dump_writes_full_zip_layout(fake_tm1, tmp_path):
         zipio.build_path(zipio.TYPE_DIMENSIONS, "}ElementAttributes_Month"),
         zipio.build_path(zipio.TYPE_CUBES, "Sales"),
         zipio.build_path(zipio.TYPE_CUBES, "Empty"),
+        zipio.build_path(zipio.TYPE_CUBES, "}ElementAttributes_Month"),
         zipio.build_path(zipio.TYPE_VIEWS, "Q1 View", "Sales"),
         zipio.build_path(zipio.TYPE_SUBSETS, "All Months", ("Month", "Month")),
         zipio.build_path(zipio.TYPE_SUBSETS, "Q1", ("Month", "Month")),
@@ -358,6 +363,7 @@ def test_dump_writes_full_zip_layout(fake_tm1, tmp_path):
         zipio.build_path(zipio.TYPE_CHORES, "Nightly Load"),
         zipio.build_path(zipio.TYPE_DATA, "Sales"),
         zipio.build_path(zipio.TYPE_DATA, "Empty"),
+        zipio.build_path(zipio.TYPE_DATA, "}ElementAttributes_Month"),
         *(zipio.build_path(zipio.TYPE_SECURITY, stem) for stem in zipio.SECURITY_FILE_NAMES),
     }
     assert set(_read_zip(out).namelist()) == expected_files
@@ -379,12 +385,12 @@ def test_manifest_counts_and_sha256_match_zip(fake_tm1, tmp_path):
     manifest = _read_manifest(out)
     expected_counts = {
         "dimensions": 4,
-        "cubes": 2,
+        "cubes": 3,
         "views": 1,
         "subsets": 4,
         "processes": 2,
         "chores": 1,
-        "data": 2,
+        "data": 3,
         "security": 4,
     }
     assert manifest.counts == expected_counts
@@ -527,6 +533,70 @@ def test_data_filter_selects_cubes_for_data(fake_tm1, tmp_path):
 
 def test_bad_filter_type_fails_fast(tmp_path):
     assert dump_module.run_dump(_dump_args(str(tmp_path / "d.zip"), include=["nope=*"])) == 2
+
+
+# --------------------------------------------------------------------------- --no-data
+
+
+def test_no_data_dumps_only_attribute_control_cube_data(fake_tm1, tmp_path):
+    out = str(tmp_path / "dump.zip")
+    assert dump_module.run_dump(_dump_args(out, no_data=True)) == 0
+    names = _read_zip(out).namelist()
+    assert zipio.build_path(zipio.TYPE_DATA, "Sales") not in " ".join(names)
+    assert zipio.build_path(zipio.TYPE_DATA, "Empty") not in " ".join(names)
+    assert zipio.build_path(zipio.TYPE_DATA, "}ElementAttributes_Month") in names
+    # cube entities and everything else are unaffected — only the data phase narrows
+    assert zipio.build_path(zipio.TYPE_CUBES, "Sales") in names
+    assert zipio.build_path(zipio.TYPE_CUBES, "Empty") in names
+
+
+def test_no_data_keeps_security_files_intact(fake_tm1, tmp_path):
+    no_data_out = str(tmp_path / "no_data.zip")
+    full_out = str(tmp_path / "full.zip")
+    assert dump_module.run_dump(_dump_args(no_data_out, no_data=True)) == 0
+    assert dump_module.run_dump(_dump_args(full_out)) == 0
+    with _read_zip(no_data_out) as no_data_zip, _read_zip(full_out) as full_zip:
+        for file_stem in zipio.SECURITY_FILE_NAMES:
+            path = zipio.build_path(zipio.TYPE_SECURITY, file_stem)
+            assert no_data_zip.read(path) == full_zip.read(path)
+
+
+def test_no_data_manifest_counts_match_zip(fake_tm1, tmp_path):
+    out = str(tmp_path / "dump.zip")
+    dump_module.run_dump(_dump_args(out, no_data=True))
+    manifest = _read_manifest(out)
+    data_files = [name for name in _read_zip(out).namelist() if name.startswith(f"{zipio.TYPE_DATA}/")]
+    assert manifest.counts["data"] == len(data_files) == 1
+    assert sum(manifest.counts.values()) == len(manifest.objects)
+
+
+def test_no_data_gates_case_insensitively(fake_tm1, tmp_path):
+    fake_tm1.cubes._cubes.append(FakeCube("}ELEMENTATTRIBUTES_Region", ["Region"]))
+    fake_tm1.cells._data["}ELEMENTATTRIBUTES_Region"] = ["North,Currency,EUR"]
+    out = str(tmp_path / "dump.zip")
+    assert dump_module.run_dump(_dump_args(out, no_data=True)) == 0
+    assert zipio.build_path(zipio.TYPE_DATA, "}ELEMENTATTRIBUTES_Region") in _read_zip(out).namelist()
+
+
+def test_no_data_combines_with_include_and_exclude_filters(fake_tm1, tmp_path):
+    narrowed_out = str(tmp_path / "narrowed.zip")
+    dump_module.run_dump(_dump_args(narrowed_out, no_data=True, include=["data=*Attr*"]))
+    narrowed_names = _read_zip(narrowed_out).namelist()
+    assert zipio.build_path(zipio.TYPE_DATA, "}ElementAttributes_Month") in narrowed_names
+    assert zipio.build_path(zipio.TYPE_DATA, "Sales") not in " ".join(narrowed_names)
+
+    empty_out = str(tmp_path / "empty.zip")
+    assert dump_module.run_dump(_dump_args(empty_out, no_data=True, exclude=["data=*"])) == 0
+    assert not [name for name in _read_zip(empty_out).namelist() if name.startswith(f"{zipio.TYPE_DATA}/")]
+    assert _read_manifest(empty_out).counts["data"] == 0
+
+
+def test_default_run_dumps_all_cube_data(fake_tm1, tmp_path):
+    out = str(tmp_path / "dump.zip")
+    dump_module.run_dump(_dump_args(out))
+    names = " ".join(_read_zip(out).namelist())
+    for cube_name in ("Sales", "Empty", "}ElementAttributes_Month"):
+        assert zipio.build_path(zipio.TYPE_DATA, cube_name) in names
 
 
 # --------------------------------------------------------------------------- errors & parallelism

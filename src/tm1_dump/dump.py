@@ -3,7 +3,8 @@
 Discovers every object on the server, applies the ``--include``/``--exclude``
 filters per type, exports objects in parallel (``--workers`` threads) and
 writes everything into one zip: object JSON per the :mod:`tm1_dump.zipio`
-layout, cube data as CSV, security as four JSON files, plus a
+layout, cube data as CSV (``--no-data`` keeps only the ``}ElementAttributes_*``
+attribute values), security as four JSON files, plus a
 ``manifest.json`` index with counts, sha256 digests and export errors.
 
 One object failing never aborts the batch: it is logged to stderr, recorded
@@ -52,6 +53,10 @@ RIGHTS_CUBES: dict[str, str] = {
 }
 
 GROUP_DIMENSION_NAME = "}groups"  # compared case-insensitively
+
+#: Name prefix of the control cubes carrying element-attribute values; the
+#: only data ``--no-data`` still exports (compared case-insensitively).
+ELEMENT_ATTRIBUTES_PREFIX = "}elementattributes_"
 
 #: One export record: ``(object_type, name, parent, file_content)``.
 ExportRecord = tuple[str, str, "str | Sequence[str] | None", str]
@@ -382,12 +387,20 @@ def _read_rights_cube(tm1: TM1Service, rights_cube: str) -> dict[str, dict[str, 
     return assignments
 
 
-def _collect_data_jobs(tm1: TM1Service, cubes: list, filters: dict) -> list[Job]:
-    """One job per cube (filtered by cube name) exporting its cells as CSV."""
+def _collect_data_jobs(tm1: TM1Service, cubes: list, filters: dict, no_data: bool = False) -> list[Job]:
+    """One job per cube (filtered by cube name) exporting its cells as CSV.
+
+    With ``no_data`` the phase narrows to the ``}ElementAttributes_*``
+    control cubes (case-insensitive) so a light dump keeps element-attribute
+    values; the ``--include``/``--exclude`` filters still apply on top, so
+    combining ``--no-data`` with ``--exclude "data=..."`` yields no data
+    files at all.
+    """
     return [
         ((zipio.TYPE_DATA, cube.name), _data_thunk(tm1, cube))
         for cube in cubes
-        if object_allowed(cube.name, filters, zipio.TYPE_DATA)
+        if (not no_data or cube.name.lower().startswith(ELEMENT_ATTRIBUTES_PREFIX))
+        and object_allowed(cube.name, filters, zipio.TYPE_DATA)
     ]
 
 
@@ -480,7 +493,7 @@ def _dump_to_zip(tm1: TM1Service, conn: ConnectionConfig, filters: dict, args: a
         (zipio.TYPE_PROCESSES, _collect_typed_object_jobs(tm1.processes.get_all(), zipio.TYPE_PROCESSES, filters)),
         (zipio.TYPE_CHORES, _collect_typed_object_jobs(tm1.chores.get_all(), zipio.TYPE_CHORES, filters)),
         (zipio.TYPE_SECURITY, _collect_security_jobs(tm1, filters)),
-        (zipio.TYPE_DATA, _collect_data_jobs(tm1, cubes, filters)),
+        (zipio.TYPE_DATA, _collect_data_jobs(tm1, cubes, filters, no_data=args.no_data)),
     ]
 
     with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:

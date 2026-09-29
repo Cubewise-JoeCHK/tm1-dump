@@ -17,6 +17,7 @@ DUMP_OPTIONS = (
     "--config-file",
     "--include",
     "--exclude",
+    "--no-data",
     "--workers",
     "--out",
 )
@@ -79,3 +80,8 @@ def test_load_takes_positional_zip():
     assert args.zip_file == "some dump.zip"
     assert args.clean is False
     assert args.dry_run is False
+
+
+def test_no_data_defaults_off_and_flag_turns_it_on():
+    assert build_parser().parse_args(["dump"]).no_data is False
+    assert build_parser().parse_args(["dump", "--no-data"]).no_data is True

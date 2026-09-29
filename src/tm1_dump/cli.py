@@ -25,6 +25,15 @@ def build_parser() -> argparse.ArgumentParser:
     dump_parser.add_argument(
         "--exclude", action="append", metavar="TYPE=PATTERN", help="skip objects matching PATTERN; repeatable"
     )
+    dump_parser.add_argument(
+        "--no-data",
+        action="store_true",
+        help=(
+            "skip regular cube data; keeps }ElementAttributes_* attribute values; "
+            "combines on top of --include/--exclude (both must pass — with "
+            '--exclude "data=..." the zip may carry no data files at all)'
+        ),
+    )
     dump_parser.add_argument("--workers", type=int, metavar="N", help="number of parallel workers")
     dump_parser.add_argument("--out", metavar="FILE.zip", help="output zip path")
     dump_parser.set_defaults(func=run_dump)

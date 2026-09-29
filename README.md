@@ -45,11 +45,16 @@ Connection settings can also come from environment variables (`TM1_ADDRESS`, `TM
 | `--out FILE.zip` | output zip path; default `<ServerName>_<timestamp>.zip` in the current directory |
 | `--include TYPE=PATTERN` | export only matching objects; repeatable; `TYPE` is one of the [zip sections](#what-is-inside-the-zip) (`dimensions`, `cubes`, `views`, `subsets`, `processes`, `chores`, `data`, `security`); a bare `PATTERN` applies to every type |
 | `--exclude TYPE=PATTERN` | skip matching objects; repeatable; exclude wins over include |
+| `--no-data` | skip regular cube data; keeps `}ElementAttributes_*` attribute values; combines on top of `--include`/`--exclude` (both must pass — with `--exclude "data=..."` the zip may carry no data files at all) |
 | `--workers N` | parallel export threads (default 8) |
 | `--address`, `--port`, `--user`, `--password`, `--ssl` / `--no-ssl`, `--namespace`, `--config-file` | connection options (shared table below) |
 
 Matching is case-insensitive fnmatch (`--include "dimensions=Ac*"`), filters apply per type,
 and one failing object never aborts the batch — it is recorded in the manifest's `errors`.
+
+`--no-data` skips regular cube data, keeps element-attribute values (the `}ElementAttributes_*`
+control cubes' data); loading into a populated target leaves that target's cube data untouched.
+Security is never affected by `--no-data` — permissions ride in `security/*.json`.
 
 Exit codes: `0` ok · `1` some objects failed to export (see `manifest.json` → `errors`) · `2`
 bad filters or connection failure.
@@ -140,7 +145,7 @@ stay a single segment (`weird/name` → `weird%2Fname`).
 
 ```bash
 uv sync
-uv run pytest          # 132 tests, incl. a mocked dump→load roundtrip
+uv run pytest          # 140 tests, incl. a mocked dump→load roundtrip
 uv run ruff check .    # lint
 uv build               # sdist + wheel
 ```
